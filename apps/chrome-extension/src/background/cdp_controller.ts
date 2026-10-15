@@ -79,4 +79,51 @@ export class CDPController {
     });
     return result?.result?.value;
   }
+
+  public async setDownloadBehavior(tabId: number, downloadPath: string): Promise<void> {
+    try {
+      await this.sendCommand(tabId, "Page.setDownloadBehavior", {
+        behavior: "allow",
+        downloadPath,
+      });
+    } catch {
+      // Page domain may require Browser domain
+    }
+  }
+
+  public async setFileInputFiles(tabId: number, selector: string, files: string[]): Promise<boolean> {
+    try {
+      const doc = await this.sendCommand(tabId, "DOM.getDocument");
+      const rootNodeId = doc?.root?.nodeId;
+      if (!rootNodeId) return false;
+
+      const node = await this.sendCommand(tabId, "DOM.querySelector", {
+        nodeId: rootNodeId,
+        selector,
+      });
+
+      if (!node?.nodeId) return false;
+
+      await this.sendCommand(tabId, "DOM.setFileInputFiles", {
+        nodeId: node.nodeId,
+        files,
+      });
+
+      // Dispatch change and input events on input element
+      await this.evaluate(
+        tabId,
+        `(() => {
+          const el = document.querySelector(${JSON.stringify(selector)});
+          if (el) {
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+        })()`
+      );
+
+      return true;
+    } catch {
+      return false;
+    }
+  }
 }

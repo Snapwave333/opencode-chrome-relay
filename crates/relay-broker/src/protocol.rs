@@ -58,6 +58,8 @@ pub struct ActionPayload {
     pub key: Option<String>,
     pub value: Option<String>,
     pub url: Option<String>,
+    pub download_path: Option<String>,
+    pub file_paths: Option<Vec<String>>,
     pub expected_origin: Option<String>,
     pub predicate: Option<String>,
     pub timeout_ms: Option<u64>,

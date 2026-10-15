@@ -282,20 +282,44 @@ export const browserTools: Record<string, ToolDefinition> = {
 
   browser_download: {
     name: "browser_download",
-    description: "Download authorized file or resource from page.",
+    description: "Download authorized file or resource from page flawlessly to local downloads.",
     parameters: {
       type: "object",
       required: ["url"],
       properties: {
-        url: { type: "string" },
+        url: { type: "string", description: "URL to download" },
+        download_path: { type: "string", description: "Optional local destination filename" },
       },
     },
     execute: async (args, client) => {
       return client.sendAction({
         type: "browser_download",
         url: args.url,
+        download_path: args.download_path,
         risk: "sensitive_action",
         is_irreversible: true,
+      });
+    },
+  },
+
+  browser_upload: {
+    name: "browser_upload",
+    description: "Upload local file(s) into a file input element on the active page flawlessly.",
+    parameters: {
+      type: "object",
+      required: ["file_paths"],
+      properties: {
+        file_paths: { type: "array", items: { type: "string" }, description: "Absolute paths to local files to upload" },
+        selector: { type: "string", description: "CSS selector for input[type='file'] element" },
+      },
+    },
+    execute: async (args, client) => {
+      return client.sendAction({
+        type: "browser_upload",
+        file_paths: args.file_paths,
+        locator: { selector: args.selector || "input[type='file']" },
+        risk: "non_sensitive_mutation",
+        is_irreversible: false,
       });
     },
   },

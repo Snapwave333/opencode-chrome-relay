@@ -136,6 +136,42 @@ async function handleActionRequest(envelope: ProtocolEnvelope): Promise<void> {
         outcome = { success: true, verified: true, screenshot_base64: screenshot };
         break;
 
+      case "browser_download":
+        if (action.url) {
+          const downloadId = await new Promise<number>((resolve, reject) => {
+            chrome.downloads.download(
+              {
+                url: action.url!,
+                filename: action.download_path,
+                saveAs: false,
+              },
+              (id) => {
+                if (chrome.runtime.lastError) {
+                  reject(new Error(chrome.runtime.lastError.message));
+                } else {
+                  resolve(id);
+                }
+              }
+            );
+          });
+          outcome = { success: true, verified: true, download_id: downloadId, url: action.url };
+        } else {
+          sendActionFailed(envelope, "Missing url for browser_download");
+          return;
+        }
+        break;
+
+      case "browser_upload":
+        const uploadSelector = action.locator?.selector || 'input[type="file"]';
+        const files = action.file_paths || [];
+        if (files.length === 0) {
+          sendActionFailed(envelope, "No file_paths specified for browser_upload");
+          return;
+        }
+        const uploadSuccess = await cdp.setFileInputFiles(tabId, uploadSelector, files);
+        outcome = { success: uploadSuccess, verified: uploadSuccess, uploaded_files: files };
+        break;
+
       case "browser_verify":
         const verified = await cdp.evaluate(
           tabId,

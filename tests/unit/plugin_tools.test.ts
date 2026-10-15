@@ -18,12 +18,34 @@ describe("OpenCode Plugin Browser Tools", () => {
       "browser_wait",
       "browser_extract",
       "browser_download",
+      "browser_upload",
       "browser_verify",
       "browser_detach",
       "browser_status",
     ];
 
     expect(Object.keys(browserTools).sort()).toEqual(requiredTools.sort());
+  });
+
+  it("browser_upload sends file upload action with selector and file_paths", async () => {
+    const mockClient = {
+      sendAction: vi.fn().mockResolvedValue({ success: true, uploaded_files: ["C:/test.pdf"], verified: true }),
+    } as unknown as RelayBrokerClient;
+
+    const uploadTool = browserTools["browser_upload"];
+    const result = await uploadTool.execute(
+      { file_paths: ["C:/test.pdf"], selector: "#file-input" },
+      mockClient
+    );
+
+    expect(result.success).toBe(true);
+    expect(mockClient.sendAction).toHaveBeenCalledWith({
+      type: "browser_upload",
+      file_paths: ["C:/test.pdf"],
+      locator: { selector: "#file-input" },
+      risk: "non_sensitive_mutation",
+      is_irreversible: false,
+    });
   });
 
   it("browser_click sends an action with external_effect risk and locator", async () => {

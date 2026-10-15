@@ -7,7 +7,7 @@
     "apps/*"
   ],
   "scripts": {
-    "build": "npm run build --workspaces --if-present",
+    "build": "npm run build --workspace=@opencode/chrome-relay-protocol && npm run build --workspace=opencode-chrome-relay && npm run build --workspace=opencode-chrome-relay-extension",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -b"

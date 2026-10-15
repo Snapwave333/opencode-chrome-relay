@@ -138,6 +138,8 @@ mod tests {
                 key: None,
                 value: None,
                 url: None,
+                download_path: None,
+                file_paths: None,
                 expected_origin: Some("https://example.com".into()),
                 predicate: None,
                 timeout_ms: None,
