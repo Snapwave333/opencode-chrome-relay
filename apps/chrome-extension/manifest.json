@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "OpenCode Chrome Relay",
+  "version": "1.0.0",
+  "description": "Browser-native agent cockpit pairing your personal Chrome profile with OpenCode.",
+  "permissions": [
+    "sidePanel",
+    "debugger",
+    "scripting",
+    "storage",
+    "nativeMessaging",
+    "activeTab",
+    "tabs"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "dist/background/index.js",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "src/sidepanel/index.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["dist/content/index.js"],
+      "run_at": "document_end"
+    }
+  ],
+  "action": {
+    "default_title": "OpenCode Chrome Relay"
+  }
+}

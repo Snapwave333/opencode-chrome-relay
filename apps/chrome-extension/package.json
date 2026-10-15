@@ -1,0 +1,17 @@
+{
+  "name": "opencode-chrome-relay-extension",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@opencode/chrome-relay-protocol": "*"
+  },
+  "devDependencies": {
+    "chrome-types": "^0.1.28",
+    "@types/chrome": "^0.0.268"
+  }
+}

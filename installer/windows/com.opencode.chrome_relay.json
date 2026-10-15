@@ -1,0 +1,9 @@
+{
+  "name": "com.opencode.chrome_relay",
+  "description": "OpenCode Chrome Relay Native Messaging Host",
+  "path": "%RELAY_HOST_EXE%",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://%EXTENSION_ID%/"
+  ]
+}

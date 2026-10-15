@@ -1,0 +1,261 @@
+use rusqlite::{params, Connection, Result};
+use std::sync::{Arc, Mutex};
+use crate::protocol::ExecutionState;
+
+#[derive(Clone)]
+pub struct Database {
+    conn: Arc<Mutex<Connection>>,
+}
+
+impl Database {
+    pub fn new_in_memory() -> Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        let db = Database {
+            conn: Arc::new(Mutex::new(conn)),
+        };
+        db.init_tables()?;
+        Ok(db)
+    }
+
+    pub fn new(path: &str) -> Result<Self> {
+        let conn = Connection::open(path)?;
+        let db = Database {
+            conn: Arc::new(Mutex::new(conn)),
+        };
+        db.init_tables()?;
+        Ok(db)
+    }
+
+    fn init_tables(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS runs (
+                run_id TEXT PRIMARY KEY,
+                project_id TEXT,
+                session_id TEXT,
+                tab_id INTEGER,
+                current_state TEXT NOT NULL,
+                epoch INTEGER NOT NULL DEFAULT 0,
+                origin_scope TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS action_journal (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL,
+                epoch INTEGER NOT NULL,
+                sequence INTEGER NOT NULL,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                action_type TEXT NOT NULL,
+                status TEXT NOT NULL, -- pending, finished, failed
+                payload_json TEXT NOT NULL,
+                outcome_json TEXT,
+                verified INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS checkpoints (
+                checkpoint_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                epoch INTEGER NOT NULL,
+                step_index INTEGER NOT NULL,
+                page_url TEXT NOT NULL,
+                page_title TEXT,
+                serialized_state TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS tab_leases (
+                lease_id TEXT PRIMARY KEY,
+                tab_id INTEGER NOT NULL UNIQUE,
+                owner_run_id TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS approvals (
+                approval_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                epoch INTEGER NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                decision TEXT,
+                resolved_by TEXT,
+                created_at TEXT NOT NULL,
+                resolved_at TEXT
+            );
+            ",
+        )?;
+        Ok(())
+    }
+
+    pub fn create_or_update_run(
+        &self,
+        run_id: &str,
+        project_id: Option<&str>,
+        session_id: Option<&str>,
+        tab_id: Option<i64>,
+        state: ExecutionState,
+        epoch: u64,
+        origin_scope: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let state_str = serde_json::to_string(&state).unwrap().replace('\"', "");
+
+        conn.execute(
+            "INSERT INTO runs (run_id, project_id, session_id, tab_id, current_state, epoch, origin_scope, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+             ON CONFLICT(run_id) DO UPDATE SET
+                current_state = excluded.current_state,
+                epoch = excluded.epoch,
+                tab_id = COALESCE(excluded.tab_id, runs.tab_id),
+                updated_at = excluded.updated_at;",
+            params![
+                run_id,
+                project_id,
+                session_id,
+                tab_id,
+                state_str,
+                epoch,
+                origin_scope,
+                now
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_run_state(&self, run_id: &str, state: ExecutionState, epoch: u64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let state_str = serde_json::to_string(&state).unwrap().replace('\"', "");
+
+        conn.execute(
+            "UPDATE runs SET current_state = ?1, epoch = ?2, updated_at = ?3 WHERE run_id = ?4",
+            params![state_str, epoch, now, run_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn record_action_pending(
+        &self,
+        run_id: &str,
+        epoch: u64,
+        sequence: u64,
+        idempotency_key: &str,
+        action_type: &str,
+        payload_json: &str,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        // Check if already exists
+        let mut stmt = conn.prepare("SELECT status FROM action_journal WHERE idempotency_key = ?1")?;
+        let mut rows = stmt.query(params![idempotency_key])?;
+        if let Some(row) = rows.next()? {
+            let status: String = row.get(0)?;
+            // Already recorded, cannot re-execute if finished or failed
+            if status == "finished" {
+                return Ok(false);
+            }
+        }
+
+        conn.execute(
+            "INSERT INTO action_journal (run_id, epoch, sequence, idempotency_key, action_type, status, payload_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6, ?7, ?7)
+             ON CONFLICT(idempotency_key) DO UPDATE SET
+                status = 'pending',
+                updated_at = excluded.updated_at;",
+            params![run_id, epoch, sequence, idempotency_key, action_type, payload_json, now],
+        )?;
+        Ok(true)
+    }
+
+    pub fn record_action_result(
+        &self,
+        idempotency_key: &str,
+        success: bool,
+        verified: bool,
+        outcome_json: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let status = if success { "finished" } else { "failed" };
+
+        conn.execute(
+            "UPDATE action_journal SET status = ?1, verified = ?2, outcome_json = ?3, updated_at = ?4
+             WHERE idempotency_key = ?5",
+            params![status, if verified { 1 } else { 0 }, outcome_json, now, idempotency_key],
+        )?;
+        Ok(())
+    }
+
+    pub fn save_checkpoint(
+        &self,
+        checkpoint_id: &str,
+        run_id: &str,
+        epoch: u64,
+        step_index: u64,
+        page_url: &str,
+        page_title: Option<&str>,
+        serialized_state: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        conn.execute(
+            "INSERT INTO checkpoints (checkpoint_id, run_id, epoch, step_index, page_url, page_title, serialized_state, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(checkpoint_id) DO UPDATE SET
+                epoch = excluded.epoch,
+                step_index = excluded.step_index,
+                page_url = excluded.page_url,
+                page_title = excluded.page_title,
+                serialized_state = excluded.serialized_state;",
+            params![checkpoint_id, run_id, epoch, step_index, page_url, page_title, serialized_state, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn acquire_tab_lease(&self, lease_id: &str, tab_id: i64, run_id: &str, duration_secs: u64) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now();
+        let now_str = now.to_rfc3339();
+        let expires_at = (now + chrono::Duration::seconds(duration_secs as i64)).to_rfc3339();
+
+        // Check current lease
+        let mut stmt = conn.prepare("SELECT owner_run_id, expires_at FROM tab_leases WHERE tab_id = ?1")?;
+        let mut rows = stmt.query(params![tab_id])?;
+        if let Some(row) = rows.next()? {
+            let owner: String = row.get(0)?;
+            let exp_str: String = row.get(1)?;
+            if owner != run_id && exp_str > now_str {
+                // Active lease owned by another run
+                return Ok(false);
+            }
+        }
+
+        conn.execute(
+            "INSERT INTO tab_leases (lease_id, tab_id, owner_run_id, expires_at, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(tab_id) DO UPDATE SET
+                lease_id = excluded.lease_id,
+                owner_run_id = excluded.owner_run_id,
+                expires_at = excluded.expires_at;",
+            params![lease_id, tab_id, run_id, expires_at, now_str],
+        )?;
+        Ok(true)
+    }
+
+    pub fn release_tab_lease(&self, tab_id: i64, run_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM tab_leases WHERE tab_id = ?1 AND owner_run_id = ?2",
+            params![tab_id, run_id],
+        )?;
+        Ok(())
+    }
+}

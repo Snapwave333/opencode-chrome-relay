@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>OpenCode Chrome Relay</title>
+  <link rel="stylesheet" href="sidepanel.css">
+</head>
+<body class="theme-dark">
+  <div class="cockpit-container">
+    <!-- Header -->
+    <header class="cockpit-header">
+      <div class="header-left">
+        <span class="logo-title">OpenCode Relay</span>
+        <span id="bridge-status-badge" class="status-badge connected">● Connected</span>
+      </div>
+      <div class="header-right">
+        <span class="model-badge">Model: <strong id="model-name">Inherited</strong></span>
+      </div>
+    </header>
+
+    <!-- Session Bar -->
+    <div class="session-bar">
+      <div class="session-info">
+        <span>Session: <strong id="session-name">Browser Task 1</strong></span>
+        <span>Tab: <strong id="tab-status">Active (Attached)</strong></span>
+      </div>
+      <button id="btn-attach-tab" class="btn-xs">Attach Current Tab</button>
+    </div>
+
+    <!-- Timeline & Chat View -->
+    <main class="timeline-container" id="timeline">
+      <div class="timeline-entry user">
+        <span class="role-tag">USER</span>
+        <p class="content-text">Find the settings and update my preferences.</p>
+      </div>
+      <div class="timeline-entry agent">
+        <span class="role-tag">AGENT</span>
+        <p class="content-text">I'll inspect the current settings page and identify the relevant preference sections.</p>
+      </div>
+
+      <!-- Live Action Status Indicator -->
+      <div class="live-action-box" id="live-action-box">
+        <div class="live-status-header">
+          <span class="pulsing-dot">◉</span>
+          <span id="live-action-text">Inspecting form · action 1/4 · 00:03 elapsed</span>
+        </div>
+        <ul class="action-steps-list" id="action-steps-list">
+          <li class="step-item done">▸ Inspected visible page DOM</li>
+          <li class="step-item active">◉ Locating target button “Save preferences”</li>
+        </ul>
+      </div>
+    </main>
+
+    <!-- Primary Control Deck -->
+    <footer class="cockpit-footer">
+      <div class="primary-controls">
+        <button id="btn-pause" class="btn-ctrl btn-pause">PAUSE</button>
+        <button id="btn-stop" class="btn-ctrl btn-stop">STOP</button>
+        <button id="btn-restart" class="btn-ctrl btn-restart">RESTART</button>
+      </div>
+
+      <div class="steer-controls">
+        <input type="text" id="steer-input" placeholder="STEER: add or change instruction..." />
+        <button id="btn-steer-send" class="btn-steer">SEND</button>
+      </div>
+
+      <div class="secondary-controls">
+        <button id="btn-take-over" class="btn-sm">TAKE OVER</button>
+        <button id="btn-approvals" class="btn-sm">APPROVALS (0)</button>
+        <button id="btn-history" class="btn-sm">HISTORY</button>
+      </div>
+    </footer>
+  </div>
+
+  <script type="module" src="sidepanel.js"></script>
+</body>
+</html>
