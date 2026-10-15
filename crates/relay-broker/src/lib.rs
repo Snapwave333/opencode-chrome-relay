@@ -172,4 +172,41 @@ mod tests {
         };
         assert!(scheduler.submit_action(&envelope_paused).is_err());
     }
+
+    #[test]
+    fn test_screenshot_purged_right_after_use() {
+        let db = Database::new_in_memory().unwrap();
+        let scheduler = Scheduler::new(db.clone());
+
+        // Create a temporary screenshot file
+        let temp_dir = std::env::temp_dir();
+        let screenshot_file = temp_dir.join(format!("test_screenshot_{}.png", uuid::Uuid::new_v4()));
+        std::fs::write(&screenshot_file, b"fake image bytes").unwrap();
+        assert!(screenshot_file.exists());
+
+        // Register pending action
+        db.record_action_pending(
+            "run_shot",
+            0,
+            1,
+            "run_shot:0:1",
+            "browser_screenshot",
+            "{}",
+        )
+        .unwrap();
+
+        let outcome = serde_json::json!({
+            "success": true,
+            "screenshot_path": screenshot_file.to_str().unwrap(),
+            "screenshot_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        });
+
+        // Complete action
+        scheduler
+            .complete_action("run_shot:0:1", true, true, &outcome.to_string())
+            .unwrap();
+
+        // 1. Verify screenshot file was deleted right after use
+        assert!(!screenshot_file.exists());
+    }
 }

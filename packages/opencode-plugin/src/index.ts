@@ -5,6 +5,7 @@ import { SessionContextManager, SessionBinding } from "./session.js";
 export * from "./client.js";
 export * from "./tools.js";
 export * from "./session.js";
+export * from "./vision.js";
 
 export interface OpenCodePluginContext {
   client: RelayBrokerClient;

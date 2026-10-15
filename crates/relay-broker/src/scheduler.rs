@@ -134,8 +134,24 @@ impl Scheduler {
         verified: bool,
         outcome_json: &str,
     ) -> Result<(), String> {
+        // Sanitize and purge screenshots right after use
+        let sanitized_outcome = if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(outcome_json) {
+            // Delete screenshot from disk if temporary file path was passed
+            if let Some(path) = val.get("screenshot_path").and_then(|p| p.as_str()) {
+                let _ = std::fs::remove_file(path);
+            }
+            // Purge large screenshot base64 bytes from SQLite journal
+            if val.get("screenshot_base64").is_some() {
+                val["screenshot_base64"] = serde_json::json!("[PURGED_RIGHT_AFTER_USE]");
+                val["screenshot_deleted"] = serde_json::json!(true);
+            }
+            serde_json::to_string(&val).unwrap_or_else(|_| outcome_json.to_string())
+        } else {
+            outcome_json.to_string()
+        };
+
         self.db
-            .record_action_result(idempotency_key, success, verified, outcome_json)
+            .record_action_result(idempotency_key, success, verified, &sanitized_outcome)
             .map_err(|e| e.to_string())
     }
 }

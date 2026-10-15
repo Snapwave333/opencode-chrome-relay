@@ -1,11 +1,17 @@
 import { RelayBrokerClient } from "./client.js";
 import { ElementLocator, RiskLevel } from "@opencode/chrome-relay-protocol";
+import { SessionContextManager } from "./session.js";
+import { VisionTaskExecutor } from "./vision.js";
 
 export interface ToolDefinition {
   name: string;
   description: string;
   parameters: Record<string, any>;
-  execute: (args: any, client: RelayBrokerClient) => Promise<any>;
+  execute: (
+    args: any,
+    client: RelayBrokerClient,
+    sessionManager?: SessionContextManager
+  ) => Promise<any>;
 }
 
 export const browserTools: Record<string, ToolDefinition> = {
@@ -61,14 +67,46 @@ export const browserTools: Record<string, ToolDefinition> = {
 
   browser_screenshot: {
     name: "browser_screenshot",
-    description: "Capture visible viewport screenshot for visual grounding (opt-in).",
-    parameters: { type: "object", properties: {} },
-    execute: async (_args, client) => {
-      return client.sendAction({
+    description:
+      "Capture visible viewport screenshot for visual grounding using the configured vision model, and automatically purge screenshot data immediately after use.",
+    parameters: {
+      type: "object",
+      properties: {
+        prompt: {
+          type: "string",
+          description: "Visual inspection question or prompt for the vision model",
+        },
+      },
+    },
+    execute: async (args, client, sessionManager) => {
+      const res = await client.sendAction({
         type: "browser_screenshot",
         risk: "read_only",
         is_irreversible: false,
       });
+
+      const visionModel = sessionManager?.getVisionModel() || "gpt-4o";
+      const imageBase64 = res?.screenshot_base64;
+
+      if (imageBase64) {
+        const prompt =
+          args?.prompt ||
+          "Observe the current browser page layout and interactive elements.";
+        const visionResult = await VisionTaskExecutor.analyzeScreenshot(
+          imageBase64,
+          prompt,
+          visionModel
+        );
+
+        return {
+          success: true,
+          vision_model_used: visionResult.visionModelUsed,
+          analysis: visionResult.analysis,
+          screenshot_deleted: true,
+        };
+      }
+
+      return res;
     },
   },
 
