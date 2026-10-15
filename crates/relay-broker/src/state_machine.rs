@@ -3,6 +3,8 @@ use crate::protocol::{ControlType, ExecutionState};
 #[derive(Debug, Clone)]
 pub struct RunSession {
     pub run_id: String,
+    pub name: String,
+    pub is_pinned: bool,
     pub state: ExecutionState,
     pub epoch: u64,
     pub sequence: u64,
@@ -14,7 +16,23 @@ pub struct RunSession {
 impl RunSession {
     pub fn new(run_id: String) -> Self {
         RunSession {
+            run_id: run_id.clone(),
+            name: format!("Session {}", &run_id[..std::cmp::min(run_id.len(), 8)]),
+            is_pinned: false,
+            state: ExecutionState::Ready,
+            epoch: 0,
+            sequence: 0,
+            tab_id: None,
+            lease_id: None,
+            pending_instruction: None,
+        }
+    }
+
+    pub fn with_name(run_id: String, name: String) -> Self {
+        RunSession {
             run_id,
+            name,
+            is_pinned: false,
             state: ExecutionState::Ready,
             epoch: 0,
             sequence: 0,

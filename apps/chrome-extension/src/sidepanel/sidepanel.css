@@ -79,6 +79,96 @@ body {
   color: var(--text-muted);
 }
 
+/* Session Tabs Bar */
+.session-tabs-bar {
+  display: flex;
+  align-items: center;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  padding: 4px 8px 0 8px;
+  gap: 4px;
+}
+
+.tabs-scroll-container {
+  display: flex;
+  overflow-x: auto;
+  gap: 4px;
+  scrollbar-width: none; /* Firefox */
+  flex: 1;
+}
+
+.tabs-scroll-container::-webkit-scrollbar {
+  display: none; /* Chrome */
+}
+
+.session-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-main);
+  border: 1px solid var(--border);
+  border-bottom: none;
+  padding: 5px 10px;
+  border-radius: 4px 4px 0 0;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+  transition: all 0.1s ease;
+}
+
+.session-tab:hover {
+  color: var(--text-main);
+  background: #1c2128;
+}
+
+.session-tab.active {
+  background: var(--bg-main);
+  color: var(--text-main);
+  border-color: var(--cyan-accent);
+  border-bottom: 1px solid var(--bg-main);
+  font-weight: 600;
+}
+
+.tab-pin-indicator {
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.tab-close-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+  border-radius: 2px;
+}
+
+.tab-close-btn:hover {
+  background: var(--border);
+  color: var(--red-error);
+}
+
+.btn-tab-action {
+  background: transparent;
+  border: 1px dashed var(--border);
+  color: var(--cyan-accent);
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  margin-bottom: 4px;
+  white-space: nowrap;
+}
+
+.btn-tab-action:hover {
+  background: var(--border);
+  border-style: solid;
+}
+
 .session-bar {
   display: flex;
   justify-content: space-between;
@@ -90,12 +180,29 @@ body {
   color: var(--text-muted);
 }
 
-.session-info span {
-  margin-right: 12px;
+.session-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .session-info strong {
   color: var(--text-main);
+}
+
+.pin-status-tag {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  color: var(--cyan-accent);
+  cursor: pointer;
+}
+
+.session-actions {
+  display: flex;
+  gap: 4px;
 }
 
 .btn-xs {
@@ -106,6 +213,15 @@ body {
   border-radius: 3px;
   font-size: 11px;
   cursor: pointer;
+}
+
+.btn-xs.btn-danger {
+  color: var(--red-error);
+  border-color: var(--red-error);
+}
+
+.btn-xs.btn-danger:hover {
+  background: rgba(248, 81, 73, 0.15);
 }
 
 .btn-xs:hover {

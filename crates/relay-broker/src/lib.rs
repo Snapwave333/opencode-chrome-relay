@@ -209,4 +209,34 @@ mod tests {
         // 1. Verify screenshot file was deleted right after use
         assert!(!screenshot_file.exists());
     }
+
+    #[test]
+    fn test_session_lifecycle_pinning_and_deletion() {
+        let db = Database::new_in_memory().unwrap();
+        let scheduler = Scheduler::new(db.clone());
+
+        // 1. Create session unpinned
+        let s1 = scheduler.create_session("sess_unpinned", Some("Temporary Task"));
+        assert!(!s1.is_pinned);
+        assert_eq!(scheduler.list_sessions().len(), 1);
+
+        // Closing unpinned session deletes it
+        let deleted = scheduler.close_session("sess_unpinned").unwrap();
+        assert!(deleted);
+        assert_eq!(scheduler.list_sessions().len(), 0);
+
+        // 2. Create session and pin it
+        let _s2 = scheduler.create_session("sess_pinned", Some("Persistent Work"));
+        scheduler.set_session_pinned("sess_pinned", true).unwrap();
+        assert_eq!(scheduler.list_sessions().len(), 1);
+
+        // Closing pinned session does NOT delete it
+        let closed_deleted = scheduler.close_session("sess_pinned").unwrap();
+        assert!(!closed_deleted); // Not deleted, preserved
+        assert_eq!(scheduler.list_sessions().len(), 1);
+
+        // 3. Manual deletion removes it even if pinned
+        scheduler.delete_session("sess_pinned").unwrap();
+        assert_eq!(scheduler.list_sessions().len(), 0);
+    }
 }

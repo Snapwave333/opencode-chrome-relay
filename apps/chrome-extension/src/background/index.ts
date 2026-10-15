@@ -11,6 +11,13 @@ const cdp = new CDPController();
 nativePort.connect();
 
 nativePort.onMessage(async (msg: ProtocolEnvelope) => {
+  // Broadcast to sidepanel and open extension views
+  try {
+    chrome.runtime.sendMessage(msg);
+  } catch {
+    // Side panel might be closed
+  }
+
   if (msg.event === "action.started" && msg.action) {
     await handleActionRequest(msg);
   }
@@ -207,5 +214,22 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
       }
     });
     return true;
+  } else if (request.type === "DISPATCH_CONTROL") {
+    nativePort.send({
+      command: request.command,
+      run_id: request.run_id,
+      epoch: request.epoch,
+      instruction: request.instruction,
+    });
+    sendResponse({ success: true });
+  } else if (request.type === "SESSION_COMMAND") {
+    nativePort.send({
+      v: 1,
+      event: request.event,
+      event_id: `evt_sess_${Date.now()}`,
+      run_id: request.run_id,
+      payload: request.payload,
+    });
+    sendResponse({ success: true });
   }
 });

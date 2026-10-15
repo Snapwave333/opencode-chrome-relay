@@ -2,15 +2,20 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import * as crypto from "crypto";
+import { NvidiaNimClient } from "./nim.js";
+import { NVIDIA_NIM_FREE_MODELS } from "@opencode/chrome-relay-protocol";
 
 export interface VisionTaskResult {
   visionModelUsed: string;
   analysis: string;
   screenshotDeleted: boolean;
   temporaryFilePath?: string;
+  retries?: number;
 }
 
 export class VisionTaskExecutor {
+  private static nimClient = new NvidiaNimClient();
+
   /**
    * Saves a base64 screenshot to a temporary file, executes the vision task
    * with the designated vision model, and guarantees immediate deletion
@@ -50,32 +55,51 @@ export class VisionTaskExecutor {
   }
 
   /**
-   * High-level vision analysis for visual grounding or verification.
+   * High-level vision analysis using free NVIDIA NIM vision models with retries and cooldowns.
    */
   public static async analyzeScreenshot(
     imageBase64: string,
     prompt: string,
-    visionModel: string
+    visionModel: string = NVIDIA_NIM_FREE_MODELS.vision
   ): Promise<VisionTaskResult> {
-    const { result, deleted } = await this.executeWithTemporaryScreenshot(
+    const cleanBase64 = imageBase64.replace(/^data:image\/\w+;base64,/, "");
+
+    const { result } = await this.executeWithTemporaryScreenshot(
       imageBase64,
       visionModel,
       async (tempPath, model) => {
-        // Vision task execution with the designated vision model
-        // In real OpenCode integration, this passes the image to the model provider
-        const analysis = `[Vision Model ${model} Analysis] Processed visual observation for prompt: "${prompt}". Target elements identified from viewport.`;
+        // Query NVIDIA NIM vision model with retries and cooldown handling
+        const completion = await this.nimClient.complete(
+          [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: prompt },
+                {
+                  type: "image_url",
+                  image_url: { url: `data:image/png;base64,${cleanBase64}` },
+                },
+              ],
+            },
+          ],
+          { model }
+        );
+
         return {
-          analysis,
+          analysis: completion.text,
+          modelUsed: completion.modelUsed,
+          retries: completion.retries,
           temporaryFilePath: tempPath,
         };
       }
     );
 
     return {
-      visionModelUsed: visionModel,
+      visionModelUsed: result.modelUsed,
       analysis: result.analysis,
       screenshotDeleted: true,
       temporaryFilePath: result.temporaryFilePath,
+      retries: result.retries,
     };
   }
 }

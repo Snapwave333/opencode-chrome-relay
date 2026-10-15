@@ -32,12 +32,14 @@ impl Database {
             "
             CREATE TABLE IF NOT EXISTS runs (
                 run_id TEXT PRIMARY KEY,
+                name TEXT,
                 project_id TEXT,
                 session_id TEXT,
                 tab_id INTEGER,
                 current_state TEXT NOT NULL,
                 epoch INTEGER NOT NULL DEFAULT 0,
                 origin_scope TEXT,
+                is_pinned INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -95,37 +97,83 @@ impl Database {
     pub fn create_or_update_run(
         &self,
         run_id: &str,
+        name: Option<&str>,
         project_id: Option<&str>,
         session_id: Option<&str>,
         tab_id: Option<i64>,
         state: ExecutionState,
         epoch: u64,
         origin_scope: Option<&str>,
+        is_pinned: bool,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let now = chrono::Utc::now().to_rfc3339();
         let state_str = serde_json::to_string(&state).unwrap().replace('\"', "");
 
         conn.execute(
-            "INSERT INTO runs (run_id, project_id, session_id, tab_id, current_state, epoch, origin_scope, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+            "INSERT INTO runs (run_id, name, project_id, session_id, tab_id, current_state, epoch, origin_scope, is_pinned, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
              ON CONFLICT(run_id) DO UPDATE SET
+                name = COALESCE(excluded.name, runs.name),
                 current_state = excluded.current_state,
                 epoch = excluded.epoch,
                 tab_id = COALESCE(excluded.tab_id, runs.tab_id),
+                is_pinned = excluded.is_pinned,
                 updated_at = excluded.updated_at;",
             params![
                 run_id,
+                name,
                 project_id,
                 session_id,
                 tab_id,
                 state_str,
                 epoch,
                 origin_scope,
+                if is_pinned { 1 } else { 0 },
                 now
             ],
         )?;
         Ok(())
+    }
+
+    pub fn set_run_pinned(&self, run_id: &str, is_pinned: bool) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE runs SET is_pinned = ?1, updated_at = ?2 WHERE run_id = ?3",
+            params![if is_pinned { 1 } else { 0 }, now, run_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_run(&self, run_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM action_journal WHERE run_id = ?1", params![run_id])?;
+        conn.execute("DELETE FROM checkpoints WHERE run_id = ?1", params![run_id])?;
+        conn.execute("DELETE FROM tab_leases WHERE owner_run_id = ?1", params![run_id])?;
+        conn.execute("DELETE FROM approvals WHERE run_id = ?1", params![run_id])?;
+        conn.execute("DELETE FROM runs WHERE run_id = ?1", params![run_id])?;
+        Ok(())
+    }
+
+    pub fn cleanup_unpinned_runs(&self) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        // Collect unpinned run_ids
+        let mut stmt = conn.prepare("SELECT run_id FROM runs WHERE is_pinned = 0")?;
+        let run_ids: Vec<String> = stmt
+            .query_map([], |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        for run_id in &run_ids {
+            conn.execute("DELETE FROM action_journal WHERE run_id = ?1", params![run_id])?;
+            conn.execute("DELETE FROM checkpoints WHERE run_id = ?1", params![run_id])?;
+            conn.execute("DELETE FROM tab_leases WHERE owner_run_id = ?1", params![run_id])?;
+            conn.execute("DELETE FROM approvals WHERE run_id = ?1", params![run_id])?;
+            conn.execute("DELETE FROM runs WHERE run_id = ?1", params![run_id])?;
+        }
+
+        Ok(run_ids.len())
     }
 
     pub fn update_run_state(&self, run_id: &str, state: ExecutionState, epoch: u64) -> Result<()> {

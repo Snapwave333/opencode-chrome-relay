@@ -40,6 +40,81 @@ impl Scheduler {
         }
     }
 
+    pub fn create_session(&self, run_id: &str, name: Option<&str>) -> RunSession {
+        let mut map = self.sessions.lock().unwrap();
+        let session_name = name.map(|s| s.to_string()).unwrap_or_else(|| {
+            format!("Session {}", &run_id[..std::cmp::min(run_id.len(), 8)])
+        });
+        let session = RunSession::with_name(run_id.to_string(), session_name.clone());
+        let _ = self.db.create_or_update_run(
+            run_id,
+            Some(&session_name),
+            None,
+            None,
+            None,
+            ExecutionState::Ready,
+            0,
+            None,
+            false,
+        );
+        map.insert(run_id.to_string(), session.clone());
+        session
+    }
+
+    pub fn set_session_pinned(&self, run_id: &str, is_pinned: bool) -> Result<(), String> {
+        let mut map = self.sessions.lock().unwrap();
+        if let Some(session) = map.get_mut(run_id) {
+            session.is_pinned = is_pinned;
+        }
+        self.db.set_run_pinned(run_id, is_pinned).map_err(|e| e.to_string())
+    }
+
+    pub fn delete_session(&self, run_id: &str) -> Result<(), String> {
+        let mut map = self.sessions.lock().unwrap();
+        if let Some(session) = map.remove(run_id) {
+            if let Some(tab_id) = session.tab_id {
+                let _ = self.db.release_tab_lease(tab_id, run_id);
+            }
+        }
+        self.db.delete_run(run_id).map_err(|e| e.to_string())
+    }
+
+    pub fn close_session(&self, run_id: &str) -> Result<bool, String> {
+        let mut map = self.sessions.lock().unwrap();
+        let session = map.get(run_id).cloned();
+        match session {
+            Some(s) => {
+                if s.is_pinned {
+                    // Pinned sessions are preserved on close
+                    Ok(false)
+                } else {
+                    // Unpinned sessions delete on close
+                    if let Some(tab_id) = s.tab_id {
+                        let _ = self.db.release_tab_lease(tab_id, run_id);
+                    }
+                    map.remove(run_id);
+                    let _ = self.db.delete_run(run_id);
+                    Ok(true) // Deleted
+                }
+            }
+            None => {
+                let _ = self.db.delete_run(run_id);
+                Ok(true)
+            }
+        }
+    }
+
+    pub fn list_sessions(&self) -> Vec<RunSession> {
+        let map = self.sessions.lock().unwrap();
+        map.values().cloned().collect()
+    }
+
+    pub fn cleanup_unpinned(&self) -> Result<usize, String> {
+        let mut map = self.sessions.lock().unwrap();
+        map.retain(|_, s| s.is_pinned);
+        self.db.cleanup_unpinned_runs().map_err(|e| e.to_string())
+    }
+
     pub fn get_or_create_session(&self, run_id: &str) -> RunSession {
         let mut map = self.sessions.lock().unwrap();
         map.entry(run_id.to_string())
@@ -47,12 +122,14 @@ impl Scheduler {
                 let session = RunSession::new(run_id.to_string());
                 let _ = self.db.create_or_update_run(
                     run_id,
+                    Some(&session.name),
                     None,
                     None,
                     None,
                     ExecutionState::Ready,
                     0,
                     None,
+                    false,
                 );
                 session
             })

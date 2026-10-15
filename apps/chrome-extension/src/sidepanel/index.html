@@ -14,39 +14,51 @@
         <span id="bridge-status-badge" class="status-badge connected">● Connected</span>
       </div>
       <div class="header-right">
-        <span class="model-badge">Model: <strong id="model-name">Inherited</strong></span>
+        <span class="model-badge">Model: <strong id="model-name">NVIDIA NIM</strong></span>
       </div>
     </header>
 
-    <!-- Session Bar -->
+    <!-- Session Tabs Bar -->
+    <div class="session-tabs-bar">
+      <div class="tabs-scroll-container" id="tabs-list">
+        <!-- Dynamic tabs injected by sidepanel.ts -->
+      </div>
+      <button id="btn-new-session" class="btn-tab-action" title="Create New Session">+ New</button>
+    </div>
+
+    <!-- Active Session Bar -->
     <div class="session-bar">
       <div class="session-info">
-        <span>Session: <strong id="session-name">Browser Task 1</strong></span>
+        <span id="session-title-label">Session: <strong id="session-name">Session 1</strong></span>
         <span>Tab: <strong id="tab-status">Active (Attached)</strong></span>
+        <span id="session-pin-status" class="pin-status-tag" title="Click to toggle pin status">📍 Unpinned (deletes on close)</span>
       </div>
-      <button id="btn-attach-tab" class="btn-xs">Attach Current Tab</button>
+      <div class="session-actions">
+        <button id="btn-toggle-pin" class="btn-xs" title="Pin session to keep across closes">Pin</button>
+        <button id="btn-delete-session" class="btn-xs btn-danger" title="Manually delete this session">Delete</button>
+        <button id="btn-attach-tab" class="btn-xs">Attach Tab</button>
+      </div>
     </div>
 
     <!-- Timeline & Chat View -->
     <main class="timeline-container" id="timeline">
       <div class="timeline-entry user">
         <span class="role-tag">USER</span>
-        <p class="content-text">Find the settings and update my preferences.</p>
+        <p class="content-text" id="initial-user-prompt">Find the settings and update my preferences.</p>
       </div>
       <div class="timeline-entry agent">
         <span class="role-tag">AGENT</span>
-        <p class="content-text">I'll inspect the current settings page and identify the relevant preference sections.</p>
+        <p class="content-text" id="initial-agent-response">Connected to NVIDIA NIM (llama-3.3-70b-instruct). Inspecting authorized tab context.</p>
       </div>
 
       <!-- Live Action Status Indicator -->
       <div class="live-action-box" id="live-action-box">
         <div class="live-status-header">
           <span class="pulsing-dot">◉</span>
-          <span id="live-action-text">Inspecting form · action 1/4 · 00:03 elapsed</span>
+          <span id="live-action-text">Ready · NVIDIA NIM active · Cooldown OK</span>
         </div>
         <ul class="action-steps-list" id="action-steps-list">
-          <li class="step-item done">▸ Inspected visible page DOM</li>
-          <li class="step-item active">◉ Locating target button “Save preferences”</li>
+          <li class="step-item done">▸ Initialized session state</li>
         </ul>
       </div>
     </main>

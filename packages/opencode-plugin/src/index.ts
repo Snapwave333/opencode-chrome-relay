@@ -6,6 +6,7 @@ export * from "./client.js";
 export * from "./tools.js";
 export * from "./session.js";
 export * from "./vision.js";
+export * from "./nim.js";
 
 export interface OpenCodePluginContext {
   client: RelayBrokerClient;
