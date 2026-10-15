@@ -210,29 +210,75 @@ function resolveInPage(locator: any): any {
 }
 
 function sendActionFinished(envelope: ProtocolEnvelope, outcome: any): void {
-  nativePort.send({
+  const tabId = envelope.tab_id || tabManager.getActiveTabId();
+  if (tabId) {
+    try {
+      chrome.tabs.sendMessage(tabId, {
+        type: "OVERLAY_ACTION_OUTCOME",
+        success: true,
+        message: outcome?.outcome_summary || "Action verified",
+      });
+    } catch {
+      // Content script may not be present
+    }
+  }
+
+  const finishedEnvelope: ProtocolEnvelope = {
     v: 1,
     event: "action.finished",
     event_id: `evt_fin_${Date.now()}`,
+    timestamp: new Date().toISOString(),
     run_id: envelope.run_id,
     epoch: envelope.epoch,
     sequence: envelope.sequence,
     idempotency_key: envelope.idempotency_key,
+    action: envelope.action,
     payload: outcome,
-  });
+  };
+
+  try {
+    chrome.runtime.sendMessage(finishedEnvelope);
+  } catch {
+    // Side panel might be closed
+  }
+
+  nativePort.send(finishedEnvelope);
 }
 
 function sendActionFailed(envelope: ProtocolEnvelope, error: string): void {
-  nativePort.send({
+  const tabId = envelope.tab_id || tabManager.getActiveTabId();
+  if (tabId) {
+    try {
+      chrome.tabs.sendMessage(tabId, {
+        type: "OVERLAY_ACTION_OUTCOME",
+        success: false,
+        message: error,
+      });
+    } catch {
+      // Content script may not be present
+    }
+  }
+
+  const failedEnvelope: ProtocolEnvelope = {
     v: 1,
     event: "action.failed",
     event_id: `evt_err_${Date.now()}`,
+    timestamp: new Date().toISOString(),
     run_id: envelope.run_id,
     epoch: envelope.epoch,
     sequence: envelope.sequence,
     idempotency_key: envelope.idempotency_key,
+    action: envelope.action,
     payload: { error },
-  });
+  };
+
+  try {
+    chrome.runtime.sendMessage(failedEnvelope);
+  } catch {
+    // Side panel might be closed
+  }
+
+  nativePort.send(failedEnvelope);
 }
 
 // Side panel communication

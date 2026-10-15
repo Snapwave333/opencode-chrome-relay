@@ -200,6 +200,17 @@ body {
   cursor: pointer;
 }
 
+.action-stats-badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: rgba(0, 212, 255, 0.1);
+  border: 1px solid rgba(0, 212, 255, 0.25);
+  color: var(--cyan-accent);
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
 .session-actions {
   display: flex;
   gap: 4px;
@@ -255,6 +266,10 @@ body {
   color: var(--cyan-accent);
 }
 
+.timeline-entry.steer .role-tag {
+  color: var(--magenta-steer);
+}
+
 .content-text {
   font-size: 12.5px;
   background: var(--bg-surface);
@@ -265,6 +280,10 @@ body {
 
 .timeline-entry.user .content-text {
   border-left-color: var(--cyan-accent);
+}
+
+.timeline-entry.steer .content-text {
+  border-left-color: var(--magenta-steer);
 }
 
 .live-action-box {
@@ -279,10 +298,11 @@ body {
 .live-status-header {
   font-weight: 600;
   color: var(--cyan-accent);
-  margin-bottom: 6px;
+  margin-bottom: 8px;
   display: flex;
   align-items: center;
   gap: 6px;
+  font-size: 11.5px;
 }
 
 .pulsing-dot {
@@ -295,24 +315,115 @@ body {
   100% { opacity: 0.4; }
 }
 
-.action-steps-list {
-  list-style: none;
+/* Activity Feed & Action Cards */
+.activity-feed {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 280px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.action-card {
+  background: #10151c;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 11.5px;
   display: flex;
   flex-direction: column;
   gap: 4px;
+  transition: all 0.15s ease;
 }
 
-.step-item {
-  color: var(--text-muted);
-  font-size: 11.5px;
+.action-card:hover {
+  background: #141b24;
+  border-color: #444c56;
 }
 
-.step-item.active {
+.action-card.active {
+  border-left-color: var(--cyan-accent);
+  background: #131d27;
+  box-shadow: 0 0 8px rgba(0, 212, 255, 0.15);
+}
+
+.action-card.success {
+  border-left-color: var(--green-ok);
+}
+
+.action-card.failed {
+  border-left-color: var(--red-error);
+}
+
+/* Card Header */
+.action-card-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+
+.action-type-badge {
+  font-size: 9.5px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 3px;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.badge-navigate { background: rgba(0, 212, 255, 0.15); color: #00d4ff; border: 1px solid rgba(0, 212, 255, 0.3); }
+.badge-click { background: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3); }
+.badge-type { background: rgba(245, 158, 11, 0.15); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3); }
+.badge-scroll { background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); }
+.badge-download { background: rgba(168, 85, 247, 0.15); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.3); }
+.badge-upload { background: rgba(236, 72, 153, 0.15); color: #f472b6; border: 1px solid rgba(236, 72, 153, 0.3); }
+.badge-verify { background: rgba(34, 197, 94, 0.15); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.3); }
+.badge-screenshot { background: rgba(99, 102, 241, 0.15); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.3); }
+.badge-system { background: rgba(139, 148, 158, 0.15); color: #8b949e; border: 1px solid rgba(139, 148, 158, 0.3); }
+
+.action-target-desc {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 10.5px;
   color: var(--text-main);
 }
 
-.step-item.done {
+.action-duration-chip {
+  font-size: 9.5px;
   color: var(--text-muted);
+  background: var(--bg-surface);
+  padding: 1px 4px;
+  border-radius: 2px;
+  white-space: nowrap;
+}
+
+.action-status-pill {
+  font-size: 9.5px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
+.pill-active { color: var(--cyan-accent); background: rgba(0, 212, 255, 0.1); }
+.pill-verified { color: var(--green-ok); background: rgba(46, 160, 67, 0.12); }
+.pill-failed { color: var(--red-error); background: rgba(248, 81, 73, 0.12); }
+
+.action-card-details {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  background: var(--bg-main);
+  padding: 4px 6px;
+  border-radius: 3px;
+  word-break: break-all;
 }
 
 .cockpit-footer {

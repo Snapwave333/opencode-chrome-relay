@@ -32,6 +32,7 @@
         <span id="session-title-label">Session: <strong id="session-name">Session 1</strong></span>
         <span>Tab: <strong id="tab-status">Active (Attached)</strong></span>
         <span id="session-pin-status" class="pin-status-tag" title="Click to toggle pin status">📍 Unpinned (deletes on close)</span>
+        <span id="session-action-stats" class="action-stats-badge" title="Verified actions count">⚡ 0 actions</span>
       </div>
       <div class="session-actions">
         <button id="btn-toggle-pin" class="btn-xs" title="Pin session to keep across closes">Pin</button>
@@ -51,15 +52,15 @@
         <p class="content-text" id="initial-agent-response">Connected to NVIDIA NIM (llama-3.3-70b-instruct). Inspecting authorized tab context.</p>
       </div>
 
-      <!-- Live Action Status Indicator -->
+      <!-- Live Action Status Indicator & Activity Feed -->
       <div class="live-action-box" id="live-action-box">
         <div class="live-status-header">
-          <span class="pulsing-dot">◉</span>
+          <span class="pulsing-dot" id="live-dot">◉</span>
           <span id="live-action-text">Ready · NVIDIA NIM active · Cooldown OK</span>
         </div>
-        <ul class="action-steps-list" id="action-steps-list">
-          <li class="step-item done">▸ Initialized session state</li>
-        </ul>
+        <div class="activity-feed" id="activity-feed">
+          <!-- Rich Action Cards injected dynamically by sidepanel.ts -->
+        </div>
       </div>
     </main>
 

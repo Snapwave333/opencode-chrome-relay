@@ -10,6 +10,8 @@ overlay.init();
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type === "OVERLAY_ACTION_PREVIEW" && msg.action) {
     overlay.showActionPreview(msg.action);
+  } else if (msg.type === "OVERLAY_ACTION_OUTCOME") {
+    overlay.showActionOutcome(msg.success, msg.message);
   } else if (msg.type === "SHOW_IN_PAGE_DOCK") {
     dock.init((command) => {
       chrome.runtime.sendMessage({ type: "DISPATCH_CONTROL", command });

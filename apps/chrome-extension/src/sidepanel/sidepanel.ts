@@ -1,5 +1,17 @@
 // Side panel UI Logic with Multi-Session Tabbed Interface & Pinning
 
+interface ActionItem {
+  id: string;
+  type: string;
+  target?: string;
+  details?: string;
+  startTime: number;
+  endTime?: number;
+  durationMs?: number;
+  status: "active" | "success" | "failed";
+  statusText?: string;
+}
+
 interface SessionData {
   runId: string;
   name: string;
@@ -7,7 +19,8 @@ interface SessionData {
   state: string;
   epoch: number;
   tabId: number | null;
-  steps: { text: string; className: "done" | "active" }[];
+  actions: ActionItem[];
+  verifiedCount: number;
 }
 
 const statusBadge = document.getElementById("bridge-status-badge") as HTMLElement;
@@ -17,11 +30,14 @@ const btnNewSession = document.getElementById("btn-new-session") as HTMLButtonEl
 const sessionNameText = document.getElementById("session-name") as HTMLElement;
 const tabStatusText = document.getElementById("tab-status") as HTMLElement;
 const sessionPinStatus = document.getElementById("session-pin-status") as HTMLElement;
+const sessionActionStats = document.getElementById("session-action-stats") as HTMLElement;
 const btnTogglePin = document.getElementById("btn-toggle-pin") as HTMLButtonElement;
 const btnDeleteSession = document.getElementById("btn-delete-session") as HTMLButtonElement;
 const btnAttachTab = document.getElementById("btn-attach-tab") as HTMLButtonElement;
+const liveDot = document.getElementById("live-dot") as HTMLElement;
 const liveActionText = document.getElementById("live-action-text") as HTMLElement;
-const actionStepsList = document.getElementById("action-steps-list") as HTMLUListElement;
+const activityFeed = document.getElementById("activity-feed") as HTMLDivElement;
+const timelineContainer = document.getElementById("timeline") as HTMLElement;
 
 const btnPause = document.getElementById("btn-pause") as HTMLButtonElement;
 const btnStop = document.getElementById("btn-stop") as HTMLButtonElement;
@@ -46,7 +62,19 @@ sessions.set("run_1", {
   state: "READY",
   epoch: 0,
   tabId: null,
-  steps: [{ text: "Initialized session with NVIDIA NIM", className: "done" }],
+  actions: [
+    {
+      id: "init_1",
+      type: "system_init",
+      target: "NVIDIA NIM Agent Engine",
+      details: "Ready · Models: llama-3.3-70b-instruct, neva-22b (vision)",
+      startTime: Date.now(),
+      durationMs: 12,
+      status: "success",
+      statusText: "Ready",
+    },
+  ],
+  verifiedCount: 1,
 });
 
 renderTabs();
@@ -124,15 +152,126 @@ function updateActiveSessionDisplay(): void {
     btnTogglePin.textContent = "Pin";
   }
 
+  sessionActionStats.textContent = `⚡ ${current.verifiedCount} verified`;
   liveActionText.textContent = `State: ${current.state} · NVIDIA NIM`;
 
-  // Re-render steps
-  actionStepsList.innerHTML = "";
-  for (const step of current.steps) {
-    const li = document.createElement("li");
-    li.className = `step-item ${step.className}`;
-    li.textContent = step.className === "active" ? `◉ ${step.text}` : `▸ ${step.text}`;
-    actionStepsList.appendChild(li);
+  renderActivityFeed(current);
+}
+
+function renderActivityFeed(session: SessionData): void {
+  activityFeed.innerHTML = "";
+  for (const action of session.actions) {
+    const card = createActionCardElement(action);
+    activityFeed.appendChild(card);
+  }
+  activityFeed.scrollTop = activityFeed.scrollHeight;
+}
+
+function createActionCardElement(action: ActionItem): HTMLElement {
+  const card = document.createElement("div");
+  card.className = `action-card action-${action.type} ${action.status}`;
+  card.id = `action-card-${action.id}`;
+
+  const header = document.createElement("div");
+  header.className = "action-card-header";
+
+  const badge = document.createElement("span");
+  const badgeInfo = getBadgeInfo(action.type);
+  badge.className = `action-type-badge ${badgeInfo.className}`;
+  badge.textContent = badgeInfo.label;
+
+  const targetDesc = document.createElement("span");
+  targetDesc.className = "action-target-desc";
+  targetDesc.textContent = action.target || action.type;
+  targetDesc.title = action.target || action.type;
+
+  const durationChip = document.createElement("span");
+  durationChip.className = "action-duration-chip";
+  if (action.status === "active") {
+    durationChip.textContent = "Running...";
+  } else if (action.durationMs !== undefined) {
+    durationChip.textContent = `${action.durationMs}ms`;
+  } else {
+    durationChip.textContent = "";
+  }
+
+  const statusPill = document.createElement("span");
+  if (action.status === "active") {
+    statusPill.className = "action-status-pill pill-active";
+    statusPill.textContent = "⚡ Running";
+  } else if (action.status === "success") {
+    statusPill.className = "action-status-pill pill-verified";
+    statusPill.textContent = "✓ Verified";
+  } else {
+    statusPill.className = "action-status-pill pill-failed";
+    statusPill.textContent = "✗ Failed";
+  }
+
+  header.appendChild(badge);
+  header.appendChild(targetDesc);
+  if (durationChip.textContent) header.appendChild(durationChip);
+  header.appendChild(statusPill);
+  card.appendChild(header);
+
+  if (action.details) {
+    const details = document.createElement("div");
+    details.className = "action-card-details";
+    details.textContent = action.details;
+    card.appendChild(details);
+  }
+
+  return card;
+}
+
+function getBadgeInfo(type: string): { label: string; className: string } {
+  switch (type) {
+    case "browser_navigate":
+      return { label: "🌐 NAVIGATE", className: "badge-navigate" };
+    case "browser_click":
+      return { label: "🖱️ CLICK", className: "badge-click" };
+    case "browser_type":
+      return { label: "⌨️ TYPE", className: "badge-type" };
+    case "browser_scroll":
+      return { label: "📜 SCROLL", className: "badge-scroll" };
+    case "browser_download":
+      return { label: "📥 DOWNLOAD", className: "badge-download" };
+    case "browser_upload":
+      return { label: "📤 UPLOAD", className: "badge-upload" };
+    case "browser_verify":
+      return { label: "👁️ VERIFY", className: "badge-verify" };
+    case "browser_screenshot":
+    case "browser_snapshot":
+      return { label: "📷 SNAPSHOT", className: "badge-screenshot" };
+    default:
+      return { label: "⚡ SYSTEM", className: "badge-system" };
+  }
+}
+
+function formatActionTarget(action: any): string {
+  if (!action) return "unknown";
+  switch (action.type) {
+    case "browser_navigate":
+      return action.url || "URL";
+    case "browser_click":
+      if (action.locator?.selector) return action.locator.selector;
+      if (action.locator?.name) return `"${action.locator.name}"`;
+      if (action.locator?.point) return `(${action.locator.point.x}, ${action.locator.point.y})`;
+      return "element";
+    case "browser_type":
+      const masked = action.text ? "••••••" : "";
+      const sel = action.locator?.selector || action.locator?.name || "field";
+      return `${sel} ➔ "${masked}"`;
+    case "browser_scroll":
+      return `${action.scroll_direction || "down"} (${action.scroll_amount || 400}px)`;
+    case "browser_download":
+      return action.download_path || action.url || "download";
+    case "browser_upload":
+      const count = action.file_paths?.length || 0;
+      return `${action.locator?.selector || 'input[type="file"]'} (${count} file${count === 1 ? "" : "s"})`;
+    case "browser_verify":
+      return action.locator?.selector || `text: "${action.text || ""}"`;
+    default:
+      return action.type;
   }
 }
 
@@ -149,7 +288,19 @@ function createNewSession(name?: string): void {
     state: "READY",
     epoch: 0,
     tabId: null,
-    steps: [{ text: `Created ${sessionName}`, className: "done" }],
+    actions: [
+      {
+        id: `init_${Date.now()}`,
+        type: "system_init",
+        target: sessionName,
+        details: "Session initialized with NVIDIA NIM",
+        startTime: Date.now(),
+        durationMs: 8,
+        status: "success",
+        statusText: "Ready",
+      },
+    ],
+    verifiedCount: 0,
   };
 
   sessions.set(runId, newSession);
@@ -230,35 +381,83 @@ sessionPinStatus.addEventListener("click", () => togglePin(activeRunId));
 
 btnAttachTab.addEventListener("click", () => {
   chrome.runtime.sendMessage({ type: "ATTACH_ACTIVE_TAB" }, (response) => {
-    if (response?.attached) {
-      const current = sessions.get(activeRunId);
-      if (current) {
-        current.tabId = response.tabId;
-        tabStatusText.textContent = `Attached (Tab ${response.tabId})`;
-        addTimelineStep(`Attached to Tab ${response.tabId}`);
-      }
+    const current = sessions.get(activeRunId);
+    if (response?.attached && current) {
+      current.tabId = response.tabId;
+      tabStatusText.textContent = `Attached (Tab ${response.tabId})`;
+      current.actions.push({
+        id: `attach_${Date.now()}`,
+        type: "system_init",
+        target: `Tab ${response.tabId}`,
+        details: "CDP attached and authorized",
+        startTime: Date.now(),
+        durationMs: 45,
+        status: "success",
+      });
+      renderActivityFeed(current);
     } else {
       tabStatusText.textContent = "Attach Failed";
     }
   });
 });
 
-btnPause.addEventListener("click", () => dispatchControl("pause"));
-btnStop.addEventListener("click", () => dispatchControl("stop"));
-btnRestart.addEventListener("click", () => dispatchControl("restart"));
+btnPause.addEventListener("click", () => {
+  dispatchControl("pause");
+  liveActionText.textContent = "PAUSED · Awaiting resume";
+  liveDot.style.color = "var(--magenta-steer)";
+});
+
+btnStop.addEventListener("click", () => {
+  dispatchControl("stop");
+  liveActionText.textContent = "STOPPED · Execution halted";
+  liveDot.style.color = "var(--red-error)";
+});
+
+btnRestart.addEventListener("click", () => {
+  dispatchControl("restart");
+  liveActionText.textContent = "RESTARTING · Epoch reset";
+  liveDot.style.color = "var(--cyan-accent)";
+});
 
 btnSteer.addEventListener("click", () => {
   const text = steerInput.value.trim();
   if (text) {
     dispatchControl("steer", text);
     steerInput.value = "";
-    addTimelineStep(`Steering: "${text}"`, "active");
+    
+    // Add steer card to timeline
+    const steerEntry = document.createElement("div");
+    steerEntry.className = "timeline-entry steer";
+    const roleTag = document.createElement("span");
+    roleTag.className = "role-tag";
+    roleTag.textContent = "STEER (USER)";
+    const content = document.createElement("p");
+    content.className = "content-text";
+    content.textContent = text;
+    steerEntry.appendChild(roleTag);
+    steerEntry.appendChild(content);
+    timelineContainer.insertBefore(steerEntry, document.getElementById("live-action-box"));
+
+    const current = sessions.get(activeRunId);
+    if (current) {
+      current.actions.push({
+        id: `steer_${Date.now()}`,
+        type: "system_init",
+        target: `Steer: "${text}"`,
+        details: "Dispatched mid-flight instruction to model",
+        startTime: Date.now(),
+        durationMs: 15,
+        status: "success",
+      });
+      renderActivityFeed(current);
+    }
   }
 });
 
 btnTakeOver.addEventListener("click", () => {
   dispatchControl("take_over");
-  addTimelineStep("Manual control taken over by user", "active");
+  liveActionText.textContent = "MANUAL TAKEOVER · Agent paused";
+  liveDot.style.color = "var(--magenta-steer)";
 });
 
 function dispatchControl(command: string, instruction?: string): void {
@@ -274,49 +473,70 @@ function dispatchControl(command: string, instruction?: string): void {
   });
 }
 
-function addTimelineStep(text: string, className: "done" | "active" = "done"): void {
-  const current = sessions.get(activeRunId);
-  if (!current) return;
-
-  current.steps.push({ text, className });
-  const li = document.createElement("li");
-  li.className = `step-item ${className}`;
-  li.textContent = className === "active" ? `◉ ${text}` : `▸ ${text}`;
-  actionStepsList.appendChild(li);
-}
-
 // Listen for broadcast events from background
 chrome.runtime.onMessage.addListener((msg) => {
   const targetRunId = msg.run_id || activeRunId;
   const session = sessions.get(targetRunId);
+  if (!session) return;
 
   if (msg.event === "run.state_changed" && msg.payload) {
-    if (session) {
-      session.state = msg.payload.new_state;
-      if (msg.epoch !== undefined) session.epoch = msg.epoch;
-      if (targetRunId === activeRunId) {
-        liveActionText.textContent = `State: ${session.state} · NVIDIA NIM`;
-      }
+    session.state = msg.payload.new_state;
+    if (msg.epoch !== undefined) session.epoch = msg.epoch;
+    if (targetRunId === activeRunId) {
+      liveActionText.textContent = `State: ${session.state} · NVIDIA NIM`;
     }
   } else if (msg.event === "action.started" && msg.action) {
-    if (session) {
-      session.steps.push({ text: `Action started: ${msg.action.type}`, className: "active" });
-      if (targetRunId === activeRunId) {
-        const li = document.createElement("li");
-        li.className = "step-item active";
-        li.textContent = `◉ Action started: ${msg.action.type}`;
-        actionStepsList.appendChild(li);
-      }
+    const actionId = msg.idempotency_key || `act_${Date.now()}`;
+    const newAction: ActionItem = {
+      id: actionId,
+      type: msg.action.type,
+      target: formatActionTarget(msg.action),
+      startTime: Date.now(),
+      status: "active",
+    };
+    session.actions.push(newAction);
+
+    if (targetRunId === activeRunId) {
+      liveDot.style.color = "var(--cyan-accent)";
+      liveActionText.textContent = `Running: ${newAction.target}`;
+      renderActivityFeed(session);
     }
   } else if (msg.event === "action.finished") {
-    if (session) {
-      session.steps.push({ text: "Action finished and verified", className: "done" });
-      if (targetRunId === activeRunId) {
-        const li = document.createElement("li");
-        li.className = "step-item done";
-        li.textContent = "▸ Action finished and verified";
-        actionStepsList.appendChild(li);
+    // Locate the active action
+    const lastActive = [...session.actions].reverse().find((a) => a.status === "active");
+    if (lastActive) {
+      lastActive.status = "success";
+      lastActive.endTime = Date.now();
+      lastActive.durationMs = lastActive.endTime - lastActive.startTime;
+      if (msg.payload?.uploaded_files) {
+        lastActive.details = `Uploaded: ${msg.payload.uploaded_files.join(", ")}`;
+      } else if (msg.payload?.download_id) {
+        lastActive.details = `Downloaded file ID: ${msg.payload.download_id}`;
+      } else if (msg.payload?.outcome_summary) {
+        lastActive.details = msg.payload.outcome_summary;
       }
+    }
+    session.verifiedCount++;
+
+    if (targetRunId === activeRunId) {
+      liveDot.style.color = "var(--green-ok)";
+      sessionActionStats.textContent = `⚡ ${session.verifiedCount} verified`;
+      liveActionText.textContent = "Verified · NVIDIA NIM ready";
+      renderActivityFeed(session);
+    }
+  } else if (msg.event === "action.failed") {
+    const lastActive = [...session.actions].reverse().find((a) => a.status === "active");
+    if (lastActive) {
+      lastActive.status = "failed";
+      lastActive.endTime = Date.now();
+      lastActive.durationMs = lastActive.endTime - lastActive.startTime;
+      lastActive.details = msg.payload?.error || "Execution failed";
+    }
+
+    if (targetRunId === activeRunId) {
+      liveDot.style.color = "var(--red-error)";
+      liveActionText.textContent = `Failed: ${msg.payload?.error || "Error"}`;
+      renderActivityFeed(session);
     }
   }
 });
