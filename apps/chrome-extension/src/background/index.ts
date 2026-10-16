@@ -10,6 +10,23 @@ const cdp = new CDPController();
 // Connect to native host upon service worker startup
 nativePort.connect();
 
+// Enable 1-click access to open side panel when extension toolbar icon is clicked
+if (chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
+  chrome.sidePanel
+    .setPanelBehavior({ openPanelOnActionClick: true })
+    .catch((err) => console.warn("Could not set openPanelOnActionClick:", err));
+}
+
+chrome.action.onClicked.addListener(async (tab) => {
+  if (chrome.sidePanel && tab.id) {
+    try {
+      await chrome.sidePanel.open({ tabId: tab.id });
+    } catch {
+      await chrome.sidePanel.open({ windowId: tab.windowId });
+    }
+  }
+});
+
 nativePort.onMessage(async (msg: ProtocolEnvelope) => {
   // Broadcast to sidepanel and open extension views
   try {
