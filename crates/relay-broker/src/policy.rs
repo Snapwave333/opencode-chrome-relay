@@ -18,10 +18,25 @@ pub fn is_forbidden_url(url: &str) -> bool {
 pub fn is_sensitive_pattern(text: &str) -> bool {
     let lower = text.to_lowercase();
     let keywords = [
-        "checkout", "purchase", "pay", "buy", "order",
-        "delete", "remove", "destroy", "terminate",
-        "send", "submit", "post", "publish",
-        "password", "passkey", "api_key", "secret", "token", "credential"
+        "checkout",
+        "purchase",
+        "pay",
+        "buy",
+        "order",
+        "delete",
+        "remove",
+        "destroy",
+        "terminate",
+        "send",
+        "submit",
+        "post",
+        "publish",
+        "password",
+        "passkey",
+        "api_key",
+        "secret",
+        "token",
+        "credential",
     ];
     keywords.iter().any(|&kw| lower.contains(kw))
 }
@@ -37,16 +52,25 @@ pub fn evaluate_action(
             return PolicyResult {
                 requires_approval: false,
                 is_forbidden: true,
-                reason: Some(format!("URL '{}' is restricted internal browser target.", url)),
+                reason: Some(format!(
+                    "URL '{}' is restricted internal browser target.",
+                    url
+                )),
             };
         }
     }
 
-    if !allowed_origins.is_empty() && !allowed_origins.contains(&"*".to_string()) && !allowed_origins.contains(&current_origin.to_string()) {
+    if !allowed_origins.is_empty()
+        && !allowed_origins.contains(&"*".to_string())
+        && !allowed_origins.contains(&current_origin.to_string())
+    {
         return PolicyResult {
             requires_approval: true,
             is_forbidden: false,
-            reason: Some(format!("Origin '{}' outside allowed scopes.", current_origin)),
+            reason: Some(format!(
+                "Origin '{}' outside allowed scopes.",
+                current_origin
+            )),
         };
     }
 
@@ -54,21 +78,35 @@ pub fn evaluate_action(
         return PolicyResult {
             requires_approval: true,
             is_forbidden: false,
-            reason: Some(format!("Action '{}' is sensitive or irreversible.", action.action_type)),
+            reason: Some(format!(
+                "Action '{}' is sensitive or irreversible.",
+                action.action_type
+            )),
         };
     }
 
     let candidate_text = format!(
         "{} {} {}",
         action.text.as_deref().unwrap_or(""),
-        action.locator.as_ref().and_then(|l| l.name.as_deref()).unwrap_or(""),
-        action.locator.as_ref().and_then(|l| l.role.as_deref()).unwrap_or("")
+        action
+            .locator
+            .as_ref()
+            .and_then(|l| l.name.as_deref())
+            .unwrap_or(""),
+        action
+            .locator
+            .as_ref()
+            .and_then(|l| l.role.as_deref())
+            .unwrap_or("")
     );
     if is_sensitive_pattern(&candidate_text) {
         return PolicyResult {
             requires_approval: true,
             is_forbidden: false,
-            reason: Some(format!("Action matches sensitive pattern in text '{}'", candidate_text.trim())),
+            reason: Some(format!(
+                "Action matches sensitive pattern in text '{}'",
+                candidate_text.trim()
+            )),
         };
     }
 

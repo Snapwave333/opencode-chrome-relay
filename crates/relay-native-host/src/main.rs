@@ -7,7 +7,8 @@ use tokio_tungstenite::connect_async;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let broker_url = std::env::var("RELAY_BROKER_URL").unwrap_or_else(|_| "ws://127.0.0.1:4098".into());
+    let broker_url =
+        std::env::var("RELAY_BROKER_URL").unwrap_or_else(|_| "ws://127.0.0.1:4098".into());
     let auth_token = std::env::var("RELAY_AUTH_TOKEN").unwrap_or_default();
 
     // Connect to local broker WebSocket
@@ -30,7 +31,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !auth_token.is_empty() {
         let auth_msg = serde_json::json!({ "auth_token": auth_token });
         let _ = ws_sender
-            .send(tokio_tungstenite::tungstenite::Message::Text(auth_msg.to_string()))
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                auth_msg.to_string(),
+            ))
             .await;
     }
 
@@ -62,7 +65,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } {
         match selected {
             RelayEvent::FromChrome(msg) => {
-                if ws_sender.send(tokio_tungstenite::tungstenite::Message::Text(msg)).await.is_err() {
+                if ws_sender
+                    .send(tokio_tungstenite::tungstenite::Message::Text(msg))
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -85,5 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 enum RelayEvent {
     FromChrome(String),
-    FromBroker(Result<tokio_tungstenite::tungstenite::Message, tokio_tungstenite::tungstenite::Error>),
+    FromBroker(
+        Result<tokio_tungstenite::tungstenite::Message, tokio_tungstenite::tungstenite::Error>,
+    ),
 }

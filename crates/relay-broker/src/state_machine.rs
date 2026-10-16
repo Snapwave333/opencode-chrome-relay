@@ -66,12 +66,18 @@ impl RunSession {
             ExecutionState::RecoveryRequired => {
                 Err("Action rejected: recovery required before resuming".into())
             }
-            ExecutionState::Restarting => Err("Action rejected: run is currently restarting".into()),
+            ExecutionState::Restarting => {
+                Err("Action rejected: run is currently restarting".into())
+            }
             ExecutionState::Steering => Err("Action rejected: run is currently steering".into()),
         }
     }
 
-    pub fn apply_control(&mut self, control: ControlType, instruction: Option<String>) -> Result<ExecutionState, String> {
+    pub fn apply_control(
+        &mut self,
+        control: ControlType,
+        instruction: Option<String>,
+    ) -> Result<ExecutionState, String> {
         let prev = self.state.clone();
         match control {
             ControlType::Pause => {
@@ -86,15 +92,13 @@ impl RunSession {
                     _ => Err(format!("Cannot pause from state {:?}", prev)),
                 }
             }
-            ControlType::Resume => {
-                match self.state {
-                    ExecutionState::Paused => {
-                        self.state = ExecutionState::Running;
-                        Ok(self.state.clone())
-                    }
-                    _ => Err(format!("Cannot resume from state {:?}", prev)),
+            ControlType::Resume => match self.state {
+                ExecutionState::Paused => {
+                    self.state = ExecutionState::Running;
+                    Ok(self.state.clone())
                 }
-            }
+                _ => Err(format!("Cannot resume from state {:?}", prev)),
+            },
             ControlType::Stop => {
                 // Invalidate epoch to fence out any pending or delayed commands
                 self.epoch += 1;
@@ -110,30 +114,26 @@ impl RunSession {
                 self.state = ExecutionState::Running;
                 Ok(self.state.clone())
             }
-            ControlType::Steer => {
-                match self.state {
-                    ExecutionState::Running | ExecutionState::Paused => {
-                        self.state = ExecutionState::Steering;
-                        self.pending_instruction = instruction;
-                        self.state = ExecutionState::Running;
-                        Ok(self.state.clone())
-                    }
-                    _ => Err(format!("Cannot steer from state {:?}", prev)),
+            ControlType::Steer => match self.state {
+                ExecutionState::Running | ExecutionState::Paused => {
+                    self.state = ExecutionState::Steering;
+                    self.pending_instruction = instruction;
+                    self.state = ExecutionState::Running;
+                    Ok(self.state.clone())
                 }
-            }
+                _ => Err(format!("Cannot steer from state {:?}", prev)),
+            },
             ControlType::TakeOver => {
                 self.state = ExecutionState::ManualTakeover;
                 Ok(self.state.clone())
             }
-            ControlType::ReturnControl => {
-                match self.state {
-                    ExecutionState::ManualTakeover => {
-                        self.state = ExecutionState::Ready;
-                        Ok(self.state.clone())
-                    }
-                    _ => Err(format!("Cannot return control from state {:?}", prev)),
+            ControlType::ReturnControl => match self.state {
+                ExecutionState::ManualTakeover => {
+                    self.state = ExecutionState::Ready;
+                    Ok(self.state.clone())
                 }
-            }
+                _ => Err(format!("Cannot return control from state {:?}", prev)),
+            },
         }
     }
 }

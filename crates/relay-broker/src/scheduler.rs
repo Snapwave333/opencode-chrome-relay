@@ -1,11 +1,11 @@
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use crate::db::Database;
 use crate::policy::{evaluate_action, PolicyResult};
 use crate::protocol::{
     AuthorizationMode, ControlCommand, ControlType, ExecutionState, ProtocolEnvelope,
 };
 use crate::state_machine::RunSession;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
 pub struct Scheduler {
@@ -42,9 +42,9 @@ impl Scheduler {
 
     pub fn create_session(&self, run_id: &str, name: Option<&str>) -> RunSession {
         let mut map = self.sessions.lock().unwrap();
-        let session_name = name.map(|s| s.to_string()).unwrap_or_else(|| {
-            format!("Session {}", &run_id[..std::cmp::min(run_id.len(), 8)])
-        });
+        let session_name = name
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("Session {}", &run_id[..std::cmp::min(run_id.len(), 8)]));
         let session = RunSession::with_name(run_id.to_string(), session_name.clone());
         let _ = self.db.create_or_update_run(
             run_id,
@@ -66,7 +66,9 @@ impl Scheduler {
         if let Some(session) = map.get_mut(run_id) {
             session.is_pinned = is_pinned;
         }
-        self.db.set_run_pinned(run_id, is_pinned).map_err(|e| e.to_string())
+        self.db
+            .set_run_pinned(run_id, is_pinned)
+            .map_err(|e| e.to_string())
     }
 
     pub fn delete_session(&self, run_id: &str) -> Result<(), String> {
@@ -138,10 +140,14 @@ impl Scheduler {
 
     pub fn handle_control(&self, cmd: &ControlCommand) -> Result<ExecutionState, String> {
         let mut map = self.sessions.lock().unwrap();
-        let session = map.get_mut(&cmd.run_id).ok_or_else(|| "Session not found".to_string())?;
+        let session = map
+            .get_mut(&cmd.run_id)
+            .ok_or_else(|| "Session not found".to_string())?;
 
         let new_state = session.apply_control(cmd.command.clone(), cmd.instruction.clone())?;
-        let _ = self.db.update_run_state(&cmd.run_id, new_state.clone(), session.epoch);
+        let _ = self
+            .db
+            .update_run_state(&cmd.run_id, new_state.clone(), session.epoch);
 
         if cmd.command == ControlType::TakeOver || cmd.command == ControlType::Stop {
             if let Some(tab_id) = session.tab_id {
@@ -152,18 +158,20 @@ impl Scheduler {
         Ok(new_state)
     }
 
-    pub fn submit_action(
-        &self,
-        envelope: &ProtocolEnvelope,
-    ) -> Result<PolicyResult, String> {
+    pub fn submit_action(&self, envelope: &ProtocolEnvelope) -> Result<PolicyResult, String> {
         let run_id = envelope.run_id.as_deref().ok_or("Missing run_id")?;
         let epoch = envelope.epoch.ok_or("Missing epoch")?;
         let sequence = envelope.sequence.unwrap_or(0);
-        let idempotency_key = envelope.idempotency_key.as_deref().ok_or("Missing idempotency_key")?;
+        let idempotency_key = envelope
+            .idempotency_key
+            .as_deref()
+            .ok_or("Missing idempotency_key")?;
         let action = envelope.action.as_ref().ok_or("Missing action")?;
 
         let mut map = self.sessions.lock().unwrap();
-        let session = map.get_mut(run_id).ok_or_else(|| "Session not found".to_string())?;
+        let session = map
+            .get_mut(run_id)
+            .ok_or_else(|| "Session not found".to_string())?;
 
         // Check cancellation fence
         session.can_admit_action(epoch)?;
@@ -171,9 +179,15 @@ impl Scheduler {
         // Check tab lease if tab specified
         if let Some(tab_id) = envelope.tab_id {
             let lease_id = envelope.lease_id.as_deref().unwrap_or("default_lease");
-            let leased = self.db.acquire_tab_lease(lease_id, tab_id, run_id, 300).map_err(|e| e.to_string())?;
+            let leased = self
+                .db
+                .acquire_tab_lease(lease_id, tab_id, run_id, 300)
+                .map_err(|e| e.to_string())?;
             if !leased {
-                return Err(format!("Tab {} is leased by another run or lease expired", tab_id));
+                return Err(format!(
+                    "Tab {} is leased by another run or lease expired",
+                    tab_id
+                ));
             }
             session.tab_id = Some(tab_id);
             session.lease_id = Some(lease_id.to_string());
@@ -193,11 +207,21 @@ impl Scheduler {
         let payload_json = serde_json::to_string(action).unwrap_or_default();
         let admitted = self
             .db
-            .record_action_pending(run_id, epoch, sequence, idempotency_key, &action.action_type, &payload_json)
+            .record_action_pending(
+                run_id,
+                epoch,
+                sequence,
+                idempotency_key,
+                &action.action_type,
+                &payload_json,
+            )
             .map_err(|e| e.to_string())?;
 
         if !admitted {
-            return Err(format!("Action with idempotency_key '{}' already finished; replay rejected", idempotency_key));
+            return Err(format!(
+                "Action with idempotency_key '{}' already finished; replay rejected",
+                idempotency_key
+            ));
         }
 
         session.sequence = sequence;
@@ -212,20 +236,21 @@ impl Scheduler {
         outcome_json: &str,
     ) -> Result<(), String> {
         // Sanitize and purge screenshots right after use
-        let sanitized_outcome = if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(outcome_json) {
-            // Delete screenshot from disk if temporary file path was passed
-            if let Some(path) = val.get("screenshot_path").and_then(|p| p.as_str()) {
-                let _ = std::fs::remove_file(path);
-            }
-            // Purge large screenshot base64 bytes from SQLite journal
-            if val.get("screenshot_base64").is_some() {
-                val["screenshot_base64"] = serde_json::json!("[PURGED_RIGHT_AFTER_USE]");
-                val["screenshot_deleted"] = serde_json::json!(true);
-            }
-            serde_json::to_string(&val).unwrap_or_else(|_| outcome_json.to_string())
-        } else {
-            outcome_json.to_string()
-        };
+        let sanitized_outcome =
+            if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(outcome_json) {
+                // Delete screenshot from disk if temporary file path was passed
+                if let Some(path) = val.get("screenshot_path").and_then(|p| p.as_str()) {
+                    let _ = std::fs::remove_file(path);
+                }
+                // Purge large screenshot base64 bytes from SQLite journal
+                if val.get("screenshot_base64").is_some() {
+                    val["screenshot_base64"] = serde_json::json!("[PURGED_RIGHT_AFTER_USE]");
+                    val["screenshot_deleted"] = serde_json::json!(true);
+                }
+                serde_json::to_string(&val).unwrap_or_else(|_| outcome_json.to_string())
+            } else {
+                outcome_json.to_string()
+            };
 
         self.db
             .record_action_result(idempotency_key, success, verified, &sanitized_outcome)

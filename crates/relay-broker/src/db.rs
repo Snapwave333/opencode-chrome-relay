@@ -1,6 +1,6 @@
+use crate::protocol::ExecutionState;
 use rusqlite::{params, Connection, Result};
 use std::sync::{Arc, Mutex};
-use crate::protocol::ExecutionState;
 
 #[derive(Clone)]
 pub struct Database {
@@ -94,6 +94,7 @@ impl Database {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create_or_update_run(
         &self,
         run_id: &str,
@@ -148,9 +149,15 @@ impl Database {
 
     pub fn delete_run(&self, run_id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM action_journal WHERE run_id = ?1", params![run_id])?;
+        conn.execute(
+            "DELETE FROM action_journal WHERE run_id = ?1",
+            params![run_id],
+        )?;
         conn.execute("DELETE FROM checkpoints WHERE run_id = ?1", params![run_id])?;
-        conn.execute("DELETE FROM tab_leases WHERE owner_run_id = ?1", params![run_id])?;
+        conn.execute(
+            "DELETE FROM tab_leases WHERE owner_run_id = ?1",
+            params![run_id],
+        )?;
         conn.execute("DELETE FROM approvals WHERE run_id = ?1", params![run_id])?;
         conn.execute("DELETE FROM runs WHERE run_id = ?1", params![run_id])?;
         Ok(())
@@ -166,9 +173,15 @@ impl Database {
             .collect();
 
         for run_id in &run_ids {
-            conn.execute("DELETE FROM action_journal WHERE run_id = ?1", params![run_id])?;
+            conn.execute(
+                "DELETE FROM action_journal WHERE run_id = ?1",
+                params![run_id],
+            )?;
             conn.execute("DELETE FROM checkpoints WHERE run_id = ?1", params![run_id])?;
-            conn.execute("DELETE FROM tab_leases WHERE owner_run_id = ?1", params![run_id])?;
+            conn.execute(
+                "DELETE FROM tab_leases WHERE owner_run_id = ?1",
+                params![run_id],
+            )?;
             conn.execute("DELETE FROM approvals WHERE run_id = ?1", params![run_id])?;
             conn.execute("DELETE FROM runs WHERE run_id = ?1", params![run_id])?;
         }
@@ -201,7 +214,8 @@ impl Database {
         let now = chrono::Utc::now().to_rfc3339();
 
         // Check if already exists
-        let mut stmt = conn.prepare("SELECT status FROM action_journal WHERE idempotency_key = ?1")?;
+        let mut stmt =
+            conn.prepare("SELECT status FROM action_journal WHERE idempotency_key = ?1")?;
         let mut rows = stmt.query(params![idempotency_key])?;
         if let Some(row) = rows.next()? {
             let status: String = row.get(0)?;
@@ -241,6 +255,7 @@ impl Database {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn save_checkpoint(
         &self,
         checkpoint_id: &str,
@@ -268,14 +283,21 @@ impl Database {
         Ok(())
     }
 
-    pub fn acquire_tab_lease(&self, lease_id: &str, tab_id: i64, run_id: &str, duration_secs: u64) -> Result<bool> {
+    pub fn acquire_tab_lease(
+        &self,
+        lease_id: &str,
+        tab_id: i64,
+        run_id: &str,
+        duration_secs: u64,
+    ) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         let now = chrono::Utc::now();
         let now_str = now.to_rfc3339();
         let expires_at = (now + chrono::Duration::seconds(duration_secs as i64)).to_rfc3339();
 
         // Check current lease
-        let mut stmt = conn.prepare("SELECT owner_run_id, expires_at FROM tab_leases WHERE tab_id = ?1")?;
+        let mut stmt =
+            conn.prepare("SELECT owner_run_id, expires_at FROM tab_leases WHERE tab_id = ?1")?;
         let mut rows = stmt.query(params![tab_id])?;
         if let Some(row) = rows.next()? {
             let owner: String = row.get(0)?;

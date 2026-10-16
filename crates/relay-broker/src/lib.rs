@@ -11,8 +11,7 @@ mod tests {
     use db::Database;
     use policy::is_forbidden_url;
     use protocol::{
-        ActionPayload, ControlCommand, ControlType,
-        ExecutionState, ProtocolEnvelope, RiskLevel,
+        ActionPayload, ControlCommand, ControlType, ExecutionState, ProtocolEnvelope, RiskLevel,
     };
     use scheduler::Scheduler;
     use state_machine::RunSession;
@@ -44,7 +43,10 @@ mod tests {
             .apply_control(ControlType::Steer, Some("New direction".into()))
             .unwrap();
         assert_eq!(steer_state, ExecutionState::Running);
-        assert_eq!(session.pending_instruction.as_deref(), Some("New direction"));
+        assert_eq!(
+            session.pending_instruction.as_deref(),
+            Some("New direction")
+        );
 
         // Stop bumps epoch and halts
         let initial_epoch = session.epoch;
@@ -182,20 +184,14 @@ mod tests {
 
         // Create a temporary screenshot file
         let temp_dir = std::env::temp_dir();
-        let screenshot_file = temp_dir.join(format!("test_screenshot_{}.png", uuid::Uuid::new_v4()));
+        let screenshot_file =
+            temp_dir.join(format!("test_screenshot_{}.png", uuid::Uuid::new_v4()));
         std::fs::write(&screenshot_file, b"fake image bytes").unwrap();
         assert!(screenshot_file.exists());
 
         // Register pending action
-        db.record_action_pending(
-            "run_shot",
-            0,
-            1,
-            "run_shot:0:1",
-            "browser_screenshot",
-            "{}",
-        )
-        .unwrap();
+        db.record_action_pending("run_shot", 0, 1, "run_shot:0:1", "browser_screenshot", "{}")
+            .unwrap();
 
         let outcome = serde_json::json!({
             "success": true,

@@ -1,10 +1,10 @@
+use crate::protocol::{ControlCommand, ProtocolEnvelope};
+use crate::scheduler::Scheduler;
+use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio_tungstenite::accept_async;
-use futures_util::{SinkExt, StreamExt};
-use crate::scheduler::Scheduler;
-use crate::protocol::{ControlCommand, ProtocolEnvelope};
 
 pub struct BrokerServer {
     addr: SocketAddr,
@@ -40,7 +40,16 @@ impl BrokerServer {
             let mut event_rx = event_tx.subscribe();
 
             tokio::spawn(async move {
-                if let Err(e) = handle_connection(stream, peer_addr, auth_token, scheduler, event_tx, &mut event_rx).await {
+                if let Err(e) = handle_connection(
+                    stream,
+                    peer_addr,
+                    auth_token,
+                    scheduler,
+                    event_tx,
+                    &mut event_rx,
+                )
+                .await
+                {
                     eprintln!("Connection error from {}: {}", peer_addr, e);
                 }
             });

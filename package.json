@@ -10,9 +10,12 @@
     "build": "npm run build --workspace=@opencode/chrome-relay-protocol && npm run build --workspace=opencode-chrome-relay && npm run build --workspace=opencode-chrome-relay-extension",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc -b"
+    "test:e2e": "playwright test",
+    "lint": "npm run build && cargo clippy --workspace --all-targets && cargo fmt --check",
+    "typecheck": "tsc --noEmit -p packages/protocol && tsc --noEmit -p packages/opencode-plugin && tsc --noEmit -p apps/chrome-extension"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.1",
     "@types/chrome": "^0.3.5",
     "@types/node": "^22.0.0",
     "typescript": "^5.5.0",

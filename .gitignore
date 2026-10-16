@@ -22,3 +22,5 @@ Thumbs.db
 *.log
 __pycache__/
 *.pyc
+test-results/
+playwright-report/

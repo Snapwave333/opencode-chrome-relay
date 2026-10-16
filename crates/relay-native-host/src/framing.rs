@@ -24,9 +24,8 @@ pub fn read_native_message<R: Read>(mut reader: R) -> io::Result<Option<String>>
     let mut msg_buf = vec![0u8; len];
     reader.read_exact(&mut msg_buf)?;
 
-    let s = String::from_utf8(msg_buf).map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("Invalid UTF-8: {}", e))
-    })?;
+    let s = String::from_utf8(msg_buf)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Invalid UTF-8: {}", e)))?;
     Ok(Some(s))
 }
 
