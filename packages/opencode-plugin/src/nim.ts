@@ -70,16 +70,17 @@ export class NvidiaNimClient {
         };
       } catch (err: any) {
         const isRateLimit = err.status === 429 || (err.message && /rate limit|too many requests|429/i.test(err.message));
+        const isGoneOrNotFound = err.status === 410 || err.status === 404;
         const isServerError = err.status >= 500 && err.status < 600;
 
-        if ((isRateLimit || isServerError) && attempt < maxRetries) {
+        if ((isRateLimit || isGoneOrNotFound || isServerError) && attempt < maxRetries) {
           retries++;
-          // Apply cooldown on 429
           const cooldownTime = isRateLimit ? Math.max(3000, 2000 * Math.pow(2, attempt)) : 1000;
           this.setModelCooldown(modelToUse, cooldownTime);
 
-          // Try switching to alternate free NIM model on rate limit if available
-          if (isRateLimit && modelToUse === NVIDIA_NIM_FREE_MODELS.generalText) {
+          if (isGoneOrNotFound) {
+            modelToUse = "poolside/laguna-xs-2.1";
+          } else if (isRateLimit && modelToUse === NVIDIA_NIM_FREE_MODELS.generalText) {
             modelToUse = NVIDIA_NIM_FREE_MODELS.fastText;
           } else if (isRateLimit && modelToUse === NVIDIA_NIM_FREE_MODELS.vision) {
             modelToUse = NVIDIA_NIM_FREE_MODELS.fallbackVision;
@@ -129,6 +130,7 @@ export class NvidiaNimClient {
     }
 
     const data: any = await response.json();
-    return data?.choices?.[0]?.message?.content || "";
+    const msg = data?.choices?.[0]?.message;
+    return msg?.content || msg?.reasoning_content || "";
   }
 }

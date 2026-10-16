@@ -27,6 +27,7 @@ export const EventTypeSchema = z.enum([
   "approval.requested",
   "approval.resolved",
   "steer.received",
+  "chat.response",
   "checkpoint.saved",
   "run.completed",
 ]);

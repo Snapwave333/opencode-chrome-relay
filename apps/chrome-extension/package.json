@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc && npx esbuild src/content/index.ts --bundle --outfile=dist/content/index.js && npx esbuild src/background/index.ts --bundle --outfile=dist/background/index.js --format=esm && npx esbuild src/sidepanel/sidepanel.ts --bundle --outfile=dist/sidepanel/sidepanel.js && node -e \"const fs = require('fs'); fs.copyFileSync('src/sidepanel/index.html', 'dist/sidepanel/index.html'); fs.copyFileSync('src/sidepanel/sidepanel.css', 'dist/sidepanel/sidepanel.css');\"",
+    "build": "node build.mjs",
     "test": "vitest run"
   },
   "dependencies": {

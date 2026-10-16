@@ -86,11 +86,9 @@ test.describe("Sidepanel Cockpit E2E Tests", () => {
   });
 
   test("updates live activity feed when actions start and finish", async ({ page }) => {
-    // Initial system card is rendered
+    // Initially zero fake system cards
     const activityFeed = page.locator("#activity-feed");
-    const initialCard = activityFeed.locator(".action-card");
-    await expect(initialCard).toHaveCount(1);
-    await expect(initialCard.first()).toContainText("SYSTEM");
+    await expect(activityFeed.locator(".action-card")).toHaveCount(0);
 
     // Simulate action.started event from background
     await page.evaluate(() => {
@@ -107,8 +105,8 @@ test.describe("Sidepanel Cockpit E2E Tests", () => {
       }
     });
 
-    await expect(activityFeed.locator(".action-card")).toHaveCount(2);
-    const clickCard = activityFeed.locator(".action-card").nth(1);
+    await expect(activityFeed.locator(".action-card")).toHaveCount(1);
+    const clickCard = activityFeed.locator(".action-card").first();
     await expect(clickCard).toHaveClass(/action-browser_click/);
     await expect(clickCard).toHaveClass(/active/);
     await expect(clickCard).toContainText("CLICK");
@@ -129,21 +127,54 @@ test.describe("Sidepanel Cockpit E2E Tests", () => {
 
     await expect(clickCard).toHaveClass(/success/);
     await expect(clickCard).toContainText("Verified");
-    await expect(page.locator("#session-action-stats")).toContainText("2 verified");
+    await expect(page.locator("#session-action-stats")).toContainText("1 verified");
   });
 
-  test("handles live user steering and appends steer card to timeline", async ({ page }) => {
+  test("handles live user chat/steering and renders agent chat.response without activity feed overhead", async ({ page }) => {
     const steerInput = page.locator("#steer-input");
-    await steerInput.fill("Focus on the primary navigation menu instead");
+    await steerInput.fill("ping");
     await page.click("#btn-steer-send");
 
     // Input cleared
     await expect(steerInput).toHaveValue("");
 
-    // Steer entry added to timeline
+    // User entry added to chat timeline
     const steerEntry = page.locator(".timeline-entry.steer");
     await expect(steerEntry).toBeVisible();
     await expect(steerEntry).toContainText("STEER (USER)");
-    await expect(steerEntry).toContainText("Focus on the primary navigation menu instead");
+    await expect(steerEntry).toContainText("ping");
+
+    // No redundant system card added to activity feed
+    await expect(page.locator("#activity-feed .action-card")).toHaveCount(0);
+
+    // Simulate chat.response from background
+    await page.evaluate(() => {
+      const listener = (window as any).__messageListener;
+      if (listener) {
+        listener({
+          event: "chat.response",
+          run_id: "run_1",
+          payload: {
+            text: "Pong! Ready to assist.",
+            model: "poolside/laguna-xs-2.1",
+          },
+        });
+      }
+    });
+
+    const agentEntry = page.locator(".timeline-entry.agent");
+    await expect(agentEntry).toBeVisible();
+    await expect(agentEntry).toContainText("Pong! Ready to assist.");
+    await expect(page.locator("#model-name")).toContainText("laguna-xs-2.1");
+
+    // Pressing Enter in #steer-input also submits chat message
+    await steerInput.fill("second message via enter");
+    await steerInput.press("Enter");
+    await expect(steerInput).toHaveValue("");
+    await expect(page.locator(".timeline-entry.user")).toHaveCount(2);
+
+    // Creating a new session tab starts with a clean isolated chat view
+    await page.click("#btn-new-session");
+    await expect(page.locator(".timeline-entry")).toHaveCount(0);
   });
 });

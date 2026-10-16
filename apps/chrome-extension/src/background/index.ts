@@ -3,6 +3,8 @@ import { TabManager } from "./tab_manager.js";
 import { CDPController } from "./cdp_controller.js";
 import { ProtocolEnvelope, ActionPayload } from "@opencode/chrome-relay-protocol";
 
+declare const __NVIDIA_API_KEY__: string | undefined;
+
 const nativePort = new NativeBridgePort();
 const tabManager = new TabManager();
 const cdp = new CDPController();
@@ -326,6 +328,14 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
       epoch: request.epoch,
       instruction: request.instruction,
     });
+    if (request.command === "steer" && request.instruction) {
+      void handleUserChat(
+        request.run_id || "run_1",
+        request.epoch || 0,
+        request.instruction,
+        request.history || []
+      );
+    }
     sendResponse({ success: true });
   } else if (request.type === "SESSION_COMMAND") {
     nativePort.send({
@@ -338,3 +348,168 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     sendResponse({ success: true });
   }
 });
+
+const ACTIVE_NIM_MODELS = [
+  "poolside/laguna-xs-2.1",
+  "openai/gpt-oss-20b",
+  "nvidia/nemotron-3-super-120b-a12b",
+];
+
+async function getNvidiaApiKey(): Promise<string> {
+  if (typeof __NVIDIA_API_KEY__ !== "undefined" && __NVIDIA_API_KEY__) {
+    return __NVIDIA_API_KEY__;
+  }
+  try {
+    const stored = await chrome.storage.local.get("nvidia_api_key");
+    if (stored?.nvidia_api_key) return stored.nvidia_api_key;
+  } catch {
+    // Storage unavailable
+  }
+  return "";
+}
+
+async function handleUserChat(
+  runId: string,
+  epoch: number,
+  userText: string,
+  history: Array<{ role: string; text: string }>
+): Promise<void> {
+  try {
+    const tabs = await new Promise<chrome.tabs.Tab[]>((resolve) => {
+      chrome.tabs.query({ active: true, currentWindow: true }, (res) => resolve(res || []));
+    });
+    const activeTab = tabs[0];
+    const tabContext = activeTab
+      ? `Active Chrome Tab: "${activeTab.title || "Untitled"}" (${activeTab.url || "about:blank"})`
+      : "No active browser tab detected.";
+
+    const apiKey = await getNvidiaApiKey();
+    if (!apiKey) {
+      broadcastChatResponse(
+        runId,
+        epoch,
+        "Pong! Relay agent is online, but NVIDIA_API_KEY is not configured in the build or extension storage.",
+        "local"
+      );
+      return;
+    }
+
+    const systemPrompt = [
+      "You are the OpenCode Chrome Relay browser agent inside the Chrome Side Panel.",
+      tabContext,
+      "Keep replies concise, direct, and helpful without filler or boilerplate.",
+      "If the user asks you to perform a browser action on the active tab (navigate, click, type, scroll), include a JSON block at the end of your reply in this exact format:",
+      '```json\n{"action":{"type":"browser_navigate","url":"https://example.com"}}\n```',
+      'Supported action types: "browser_navigate" (with "url"), "browser_click" (with "locator":{"selector":"...","name":"..."}), "browser_type" (with "locator":{"selector":"..."},"text":"..."), "browser_scroll" (with "scroll_direction":"down"|"up","scroll_amount":400).',
+      "For normal chat or questions (like 'ping'), just reply in plain text without any JSON block.",
+    ].join("\n");
+
+    const priorMessages = history
+      .slice(-8)
+      .filter((m) => m.text && m.text !== "Thinking...")
+      .map((m) => ({
+        role: (m.role === "agent" ? "assistant" : "user") as "assistant" | "user",
+        content: m.text,
+      }));
+
+    if (priorMessages.length === 0 || priorMessages[priorMessages.length - 1].content !== userText) {
+      priorMessages.push({ role: "user", content: userText });
+    }
+
+    let replyText = "";
+    let modelUsed = ACTIVE_NIM_MODELS[0];
+
+    for (const model of ACTIVE_NIM_MODELS) {
+      try {
+        const res = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({
+            model,
+            messages: [{ role: "system", content: systemPrompt }, ...priorMessages],
+            temperature: 0.2,
+            max_tokens: 400,
+          }),
+        });
+
+        if (!res.ok) continue;
+        const data: any = await res.json();
+        const msg = data?.choices?.[0]?.message;
+        const content = (msg?.content || msg?.reasoning_content || "").trim();
+        if (content) {
+          replyText = content;
+          modelUsed = model;
+          break;
+        }
+      } catch {
+        // Try next model
+      }
+    }
+
+    if (!replyText) {
+      replyText = "Pong! Agent is connected, but NVIDIA NIM did not return a response.";
+    }
+
+    // Check if the model emitted a browser action block
+    const jsonMatch = replyText.match(/```json\s*(\{[\s\S]*?\})\s*```/) || replyText.match(/(\{"action"\s*:\s*\{[\s\S]*?\}\})/);
+    let parsedAction: ActionPayload | null = null;
+    if (jsonMatch && jsonMatch[1]) {
+      try {
+        const parsed = JSON.parse(jsonMatch[1]);
+        if (parsed?.action?.type) {
+          parsedAction = parsed.action as ActionPayload;
+          replyText = replyText.replace(jsonMatch[0], "").trim();
+        }
+      } catch {
+        // Ignore malformed JSON block
+      }
+    }
+
+    broadcastChatResponse(runId, epoch, replyText || `Executing ${parsedAction?.type}...`, modelUsed);
+
+    if (parsedAction && activeTab?.id) {
+      const actionEnvelope: ProtocolEnvelope = {
+        v: 1,
+        event: "action.started",
+        event_id: `evt_act_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        run_id: runId,
+        epoch,
+        tab_id: activeTab.id,
+        idempotency_key: `idem_${Date.now()}`,
+        action: parsedAction,
+      };
+      try {
+        chrome.runtime.sendMessage(actionEnvelope);
+      } catch {
+        // Sidepanel closed
+      }
+      await handleActionRequest(actionEnvelope);
+    }
+  } catch (err: any) {
+    broadcastChatResponse(runId, epoch, `Error: ${err?.message || "Failed to contact agent"}`, "error");
+  }
+}
+
+function broadcastChatResponse(runId: string, epoch: number, text: string, model: string): void {
+  const envelope: ProtocolEnvelope = {
+    v: 1,
+    event: "chat.response",
+    event_id: `evt_chat_${Date.now()}`,
+    timestamp: new Date().toISOString(),
+    run_id: runId,
+    epoch,
+    payload: {
+      text,
+      model,
+    },
+  };
+  try {
+    chrome.runtime.sendMessage(envelope);
+  } catch {
+    // Sidepanel closed
+  }
+}

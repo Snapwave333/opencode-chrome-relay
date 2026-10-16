@@ -14,7 +14,7 @@
         <span id="bridge-status-badge" class="status-badge connected">● Connected</span>
       </div>
       <div class="header-right">
-        <span class="model-badge">Model: <strong id="model-name">NVIDIA NIM</strong></span>
+        <span class="model-badge"><strong id="model-name">NVIDIA NIM</strong></span>
       </div>
     </header>
 
@@ -26,58 +26,50 @@
       <button id="btn-new-session" class="btn-tab-action" title="Create New Session">+ New</button>
     </div>
 
-    <!-- Active Session Bar -->
+    <!-- Compact Active Session Bar -->
     <div class="session-bar">
       <div class="session-info">
-        <span id="session-title-label">Session: <strong id="session-name">Session 1</strong></span>
-        <span>Tab: <strong id="tab-status">Active (Attached)</strong></span>
-        <span id="session-pin-status" class="pin-status-tag" title="Click to toggle pin status">Unpinned (deletes on close)</span>
+        <strong id="session-name">Task 1</strong>
+        <span class="meta-sep">·</span>
+        <span id="tab-status">Active Tab</span>
+        <span id="session-pin-status" class="pin-status-tag" title="Click to toggle pin status">Unpinned</span>
         <span id="session-action-stats" class="action-stats-badge" title="Verified actions count">0 verified</span>
       </div>
       <div class="session-actions">
         <button id="btn-toggle-pin" class="btn-xs" title="Pin session to keep across closes">Pin</button>
-        <button id="btn-delete-session" class="btn-xs btn-danger" title="Manually delete this session">Delete</button>
-        <button id="btn-attach-tab" class="btn-xs">Attach Tab</button>
+        <button id="btn-attach-tab" class="btn-xs">Attach</button>
+        <button id="btn-delete-session" class="btn-xs btn-danger" title="Delete session">Delete</button>
       </div>
     </div>
 
     <!-- Timeline & Chat View -->
     <main class="timeline-container" id="timeline">
-      <div class="timeline-entry user">
-        <span class="role-tag">USER</span>
-        <p class="content-text" id="initial-user-prompt">Find the settings and update my preferences.</p>
-      </div>
-      <div class="timeline-entry agent">
-        <span class="role-tag">AGENT</span>
-        <p class="content-text" id="initial-agent-response">Connected to NVIDIA NIM (llama-3.3-70b-instruct). Inspecting authorized tab context.</p>
-      </div>
+      <div class="chat-messages" id="chat-messages"></div>
 
-      <!-- Live Action Status Indicator & Activity Feed -->
-      <div class="live-action-box" id="live-action-box">
+      <!-- Live Action Status Indicator & Activity Feed (only shown when browser actions run) -->
+      <div class="live-action-box" id="live-action-box" style="display: none;">
         <div class="live-status-header">
           <span class="pulsing-dot" id="live-dot">◉</span>
-          <span id="live-action-text">Ready · NVIDIA NIM active · Cooldown OK</span>
+          <span id="live-action-text">Ready</span>
         </div>
-        <div class="activity-feed" id="activity-feed">
-          <!-- Rich Action Cards injected dynamically by sidepanel.ts -->
-        </div>
+        <div class="activity-feed" id="activity-feed"></div>
       </div>
     </main>
 
     <!-- Primary Control Deck -->
     <footer class="cockpit-footer">
+      <div class="steer-controls">
+        <input type="text" id="steer-input" placeholder="Message agent or enter browser instruction..." autocomplete="off" />
+        <button id="btn-steer-send" class="btn-steer">SEND</button>
+      </div>
+
       <div class="primary-controls">
         <button id="btn-pause" class="btn-ctrl btn-pause">PAUSE</button>
         <button id="btn-stop" class="btn-ctrl btn-stop">STOP</button>
         <button id="btn-restart" class="btn-ctrl btn-restart">RESTART</button>
       </div>
 
-      <div class="steer-controls">
-        <input type="text" id="steer-input" placeholder="STEER: add or change instruction..." />
-        <button id="btn-steer-send" class="btn-steer">SEND</button>
-      </div>
-
-      <div class="secondary-controls">
+      <div class="secondary-controls" style="display: none;">
         <button id="btn-take-over" class="btn-sm">TAKE OVER</button>
         <button id="btn-approvals" class="btn-sm">APPROVALS (0)</button>
         <button id="btn-history" class="btn-sm">HISTORY</button>

@@ -1,4 +1,4 @@
-// Side panel UI Logic with Multi-Session Tabbed Interface & Pinning
+// Side panel UI Logic with Multi-Session Tabbed Interface, Live Chat & Pinning
 import { getMaterial3Svg, Material3IconName } from "../shared/material_icons.js";
 
 interface ActionItem {
@@ -13,6 +13,13 @@ interface ActionItem {
   statusText?: string;
 }
 
+interface ChatMessage {
+  id: string;
+  role: "user" | "agent";
+  text: string;
+  pending?: boolean;
+}
+
 interface SessionData {
   runId: string;
   name: string;
@@ -20,6 +27,7 @@ interface SessionData {
   state: string;
   epoch: number;
   tabId: number | null;
+  messages: ChatMessage[];
   actions: ActionItem[];
   verifiedCount: number;
 }
@@ -35,9 +43,11 @@ const sessionActionStats = document.getElementById("session-action-stats") as HT
 const btnTogglePin = document.getElementById("btn-toggle-pin") as HTMLButtonElement;
 const btnDeleteSession = document.getElementById("btn-delete-session") as HTMLButtonElement;
 const btnAttachTab = document.getElementById("btn-attach-tab") as HTMLButtonElement;
+const liveActionBox = document.getElementById("live-action-box") as HTMLElement;
 const liveDot = document.getElementById("live-dot") as HTMLElement;
 const liveActionText = document.getElementById("live-action-text") as HTMLElement;
 const activityFeed = document.getElementById("activity-feed") as HTMLDivElement;
+const chatMessagesContainer = document.getElementById("chat-messages") as HTMLElement;
 const timelineContainer = document.getElementById("timeline") as HTMLElement;
 
 const btnPause = document.getElementById("btn-pause") as HTMLButtonElement;
@@ -52,10 +62,9 @@ const sessions: Map<string, SessionData> = new Map();
 let activeRunId = "run_1";
 let sessionCounter = 1;
 
-// Default NVIDIA NIM model
-modelNameLabel.textContent = "NVIDIA NIM (Free)";
+modelNameLabel.textContent = "NVIDIA NIM";
 
-// Initialize with primary default session
+// Initialize with clean primary session (no fake messages or fake action cards)
 sessions.set("run_1", {
   runId: "run_1",
   name: "Task 1",
@@ -63,23 +72,10 @@ sessions.set("run_1", {
   state: "READY",
   epoch: 0,
   tabId: null,
-  actions: [
-    {
-      id: "init_1",
-      type: "system_init",
-      target: "NVIDIA NIM Agent Engine",
-      details: "Ready · Models: llama-3.3-70b-instruct, neva-22b (vision)",
-      startTime: Date.now(),
-      durationMs: 12,
-      status: "success",
-      statusText: "Ready",
-    },
-  ],
-  verifiedCount: 1,
+  messages: [],
+  actions: [],
+  verifiedCount: 0,
 });
-
-renderTabs();
-updateActiveSessionDisplay();
 
 // Initialize button icons with Material 3
 btnNewSession.innerHTML = `${getMaterial3Svg("add", 12)} <span>New</span>`;
@@ -88,14 +84,17 @@ btnStop.innerHTML = `${getMaterial3Svg("stop", 12)} <span>STOP</span>`;
 btnRestart.innerHTML = `${getMaterial3Svg("restart_alt", 12)} <span>RESTART</span>`;
 btnSteer.innerHTML = `${getMaterial3Svg("send", 12)} <span>SEND</span>`;
 
+renderTabs();
+updateActiveSessionDisplay();
+
 // Query bridge status from background
 chrome.runtime.sendMessage({ type: "GET_BRIDGE_STATUS" }, (response) => {
   if (response?.connected) {
     statusBadge.textContent = "● Connected";
     statusBadge.className = "status-badge connected";
   } else {
-    statusBadge.textContent = "○ Standby";
-    statusBadge.className = "status-badge disconnected";
+    statusBadge.textContent = "● Ready";
+    statusBadge.className = "status-badge connected";
   }
 });
 
@@ -105,7 +104,7 @@ function renderTabs(): void {
   for (const session of sessions.values()) {
     const tabEl = document.createElement("div");
     tabEl.className = `session-tab ${session.runId === activeRunId ? "active" : ""}`;
-    tabEl.title = `${session.name} (${session.isPinned ? "Pinned" : "Unpinned - deletes on close"})`;
+    tabEl.title = `${session.name} (${session.isPinned ? "Pinned" : "Unpinned"})`;
     tabEl.onclick = () => switchSession(session.runId);
 
     const titleSpan = document.createElement("span");
@@ -113,8 +112,10 @@ function renderTabs(): void {
 
     const pinIndicator = document.createElement("span");
     pinIndicator.className = "tab-pin-indicator";
-    pinIndicator.innerHTML = session.isPinned ? getMaterial3Svg("push_pin", 12) : getMaterial3Svg("push_pin_outline", 12);
-    pinIndicator.title = session.isPinned ? "Pinned: preserved on close" : "Unpinned: deletes on close";
+    pinIndicator.innerHTML = session.isPinned
+      ? getMaterial3Svg("push_pin", 12)
+      : getMaterial3Svg("push_pin_outline", 12);
+    pinIndicator.title = session.isPinned ? "Pinned" : "Unpinned";
     pinIndicator.onclick = (e) => {
       e.stopPropagation();
       togglePin(session.runId);
@@ -123,7 +124,9 @@ function renderTabs(): void {
     const closeBtn = document.createElement("button");
     closeBtn.className = "tab-close-btn";
     closeBtn.innerHTML = getMaterial3Svg("close", 12);
-    closeBtn.title = session.isPinned ? "Pinned session (click unpin first to close/delete)" : "Close session (deletes session)";
+    closeBtn.title = session.isPinned
+      ? "Pinned session (unpin first to close)"
+      : "Close session";
     closeBtn.onclick = (e) => {
       e.stopPropagation();
       closeSession(session.runId);
@@ -156,31 +159,70 @@ function updateActiveSessionDisplay(): void {
   if (!current) return;
 
   sessionNameText.textContent = current.name;
-  tabStatusText.textContent = current.tabId ? `Attached (Tab ${current.tabId})` : "Active (Attached)";
+  tabStatusText.textContent = current.tabId ? `Tab ${current.tabId}` : "Active Tab";
 
   if (current.isPinned) {
-    sessionPinStatus.innerHTML = `${getMaterial3Svg("push_pin", 12)} <span>Pinned (kept on close)</span>`;
+    sessionPinStatus.innerHTML = `${getMaterial3Svg("push_pin", 12)} <span>Pinned</span>`;
     sessionPinStatus.style.borderColor = "var(--cyan-accent)";
     btnTogglePin.textContent = "Unpin";
   } else {
-    sessionPinStatus.innerHTML = `${getMaterial3Svg("push_pin_outline", 12)} <span>Unpinned (deletes on close)</span>`;
+    sessionPinStatus.innerHTML = `${getMaterial3Svg("push_pin_outline", 12)} <span>Unpinned</span>`;
     sessionPinStatus.style.borderColor = "var(--border)";
     btnTogglePin.textContent = "Pin";
   }
 
   sessionActionStats.innerHTML = `${getMaterial3Svg("bolt", 12)} <span>${current.verifiedCount} verified</span>`;
-  liveActionText.textContent = `State: ${current.state} · NVIDIA NIM`;
+  liveActionText.textContent = `${current.state}`;
 
+  renderChatMessages(current);
   renderActivityFeed(current);
+}
+
+function renderChatMessages(session: SessionData): void {
+  chatMessagesContainer.innerHTML = "";
+
+  if (session.messages.length === 0) {
+    const emptyHint = document.createElement("div");
+    emptyHint.className = "chat-empty-state";
+    emptyHint.textContent = "Send a message or browser instruction below.";
+    chatMessagesContainer.appendChild(emptyHint);
+    return;
+  }
+
+  for (const msg of session.messages) {
+    const entry = document.createElement("div");
+    entry.className =
+      msg.role === "user"
+        ? "timeline-entry user steer"
+        : `timeline-entry agent${msg.pending ? " pending" : ""}`;
+
+    const roleTag = document.createElement("span");
+    roleTag.className = "role-tag";
+    roleTag.textContent = msg.role === "user" ? "USER · STEER (USER)" : "AGENT";
+
+    const content = document.createElement("p");
+    content.className = "content-text";
+    content.textContent = msg.text;
+
+    entry.appendChild(roleTag);
+    entry.appendChild(content);
+    chatMessagesContainer.appendChild(entry);
+  }
+
+  timelineContainer.scrollTop = timelineContainer.scrollHeight;
 }
 
 function renderActivityFeed(session: SessionData): void {
   activityFeed.innerHTML = "";
+  const shouldShowBox = session.actions.length > 0 || session.state !== "READY";
+  liveActionBox.style.display = shouldShowBox ? "block" : "none";
+
   for (const action of session.actions) {
     const card = createActionCardElement(action);
     activityFeed.appendChild(card);
   }
   activityFeed.scrollTop = activityFeed.scrollHeight;
+  timelineContainer.scrollTop = timelineContainer.scrollHeight;
 }
 
 function createActionCardElement(action: ActionItem): HTMLElement {
@@ -291,7 +333,7 @@ function formatActionTarget(action: any): string {
   }
 }
 
-// Create new session
+// Create new session tab inside sidepanel (never opens a new Chrome browser tab)
 function createNewSession(name?: string): void {
   sessionCounter++;
   const runId = `run_${Date.now()}`;
@@ -304,18 +346,8 @@ function createNewSession(name?: string): void {
     state: "READY",
     epoch: 0,
     tabId: null,
-    actions: [
-      {
-        id: `init_${Date.now()}`,
-        type: "system_init",
-        target: sessionName,
-        details: "Session initialized with NVIDIA NIM",
-        startTime: Date.now(),
-        durationMs: 8,
-        status: "success",
-        statusText: "Ready",
-      },
-    ],
+    messages: [],
+    actions: [],
     verifiedCount: 0,
   };
 
@@ -324,7 +356,6 @@ function createNewSession(name?: string): void {
   renderTabs();
   updateActiveSessionDisplay();
 
-  // Notify background/broker
   chrome.runtime.sendMessage({
     type: "SESSION_COMMAND",
     event: "session.create",
@@ -333,7 +364,6 @@ function createNewSession(name?: string): void {
   });
 }
 
-// Close session: delete on close unless pinned
 function closeSession(runId: string): void {
   const session = sessions.get(runId);
   if (!session) return;
@@ -343,15 +373,12 @@ function closeSession(runId: string): void {
     return;
   }
 
-  // Unpinned session deletes on close
   deleteSession(runId, true);
 }
 
-// Manually delete session (regardless of pin status)
 function deleteSession(runId: string, fromClose = false): void {
   sessions.delete(runId);
 
-  // Notify background/broker to delete run data and journal
   chrome.runtime.sendMessage({
     type: "SESSION_COMMAND",
     event: fromClose ? "session.close" : "session.delete",
@@ -359,7 +386,7 @@ function deleteSession(runId: string, fromClose = false): void {
   });
 
   if (sessions.size === 0) {
-    // If all sessions deleted, create a fresh one
+    sessionCounter = 0;
     createNewSession("Task 1");
   } else if (activeRunId === runId) {
     const firstRemaining = sessions.keys().next().value;
@@ -372,7 +399,6 @@ function deleteSession(runId: string, fromClose = false): void {
   updateActiveSessionDisplay();
 }
 
-// Toggle pin status
 function togglePin(runId: string): void {
   const session = sessions.get(runId);
   if (!session) return;
@@ -400,17 +426,7 @@ btnAttachTab.addEventListener("click", () => {
     const current = sessions.get(activeRunId);
     if (response?.attached && current) {
       current.tabId = response.tabId;
-      tabStatusText.textContent = `Attached (Tab ${response.tabId})`;
-      current.actions.push({
-        id: `attach_${Date.now()}`,
-        type: "system_init",
-        target: `Tab ${response.tabId}`,
-        details: "CDP attached and authorized",
-        startTime: Date.now(),
-        durationMs: 45,
-        status: "success",
-      });
-      renderActivityFeed(current);
+      tabStatusText.textContent = `Tab ${response.tabId}`;
     } else {
       tabStatusText.textContent = "Attach Failed";
     }
@@ -418,60 +434,81 @@ btnAttachTab.addEventListener("click", () => {
 });
 
 btnPause.addEventListener("click", () => {
+  const current = sessions.get(activeRunId);
+  if (current) current.state = "PAUSED";
   dispatchControl("pause");
+  liveActionBox.style.display = "block";
   liveActionText.textContent = "PAUSED · Awaiting resume";
   liveDot.style.color = "var(--magenta-steer)";
 });
 
 btnStop.addEventListener("click", () => {
+  const current = sessions.get(activeRunId);
+  if (current) current.state = "STOPPED";
   dispatchControl("stop");
+  liveActionBox.style.display = "block";
   liveActionText.textContent = "STOPPED · Execution halted";
   liveDot.style.color = "var(--red-error)";
 });
 
 btnRestart.addEventListener("click", () => {
+  const current = sessions.get(activeRunId);
+  if (current) current.state = "READY";
   dispatchControl("restart");
-  liveActionText.textContent = "RESTARTING · Epoch reset";
+  liveActionText.textContent = "READY";
   liveDot.style.color = "var(--cyan-accent)";
+  if (current) renderActivityFeed(current);
 });
 
-btnSteer.addEventListener("click", () => {
+function submitChatMessage(): void {
   const text = steerInput.value.trim();
-  if (text) {
-    dispatchControl("steer", text);
-    steerInput.value = "";
-    
-    // Add steer card to timeline
-    const steerEntry = document.createElement("div");
-    steerEntry.className = "timeline-entry steer";
-    const roleTag = document.createElement("span");
-    roleTag.className = "role-tag";
-    roleTag.textContent = "STEER (USER)";
-    const content = document.createElement("p");
-    content.className = "content-text";
-    content.textContent = text;
-    steerEntry.appendChild(roleTag);
-    steerEntry.appendChild(content);
-    timelineContainer.insertBefore(steerEntry, document.getElementById("live-action-box"));
+  if (!text) return;
 
-    const current = sessions.get(activeRunId);
-    if (current) {
-      current.actions.push({
-        id: `steer_${Date.now()}`,
-        type: "system_init",
-        target: `Steer: "${text}"`,
-        details: "Dispatched mid-flight instruction to model",
-        startTime: Date.now(),
-        durationMs: 15,
-        status: "success",
-      });
-      renderActivityFeed(current);
-    }
+  const current = sessions.get(activeRunId);
+  if (!current) return;
+
+  steerInput.value = "";
+
+  const historySnapshot = current.messages
+    .filter((m) => !m.pending)
+    .map((m) => ({ role: m.role, text: m.text }));
+
+  current.messages.push({
+    id: `msg_u_${Date.now()}`,
+    role: "user",
+    text,
+  });
+
+  current.messages.push({
+    id: `msg_a_${Date.now()}`,
+    role: "agent",
+    text: "Thinking...",
+    pending: true,
+  });
+
+  renderChatMessages(current);
+
+  chrome.runtime.sendMessage({
+    type: "DISPATCH_CONTROL",
+    command: "steer",
+    run_id: current.runId,
+    epoch: current.epoch,
+    instruction: text,
+    history: [...historySnapshot, { role: "user", text }],
+  });
+}
+
+btnSteer.addEventListener("click", () => submitChatMessage());
+steerInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    submitChatMessage();
   }
 });
 
 btnTakeOver.addEventListener("click", () => {
   dispatchControl("take_over");
+  liveActionBox.style.display = "block";
   liveActionText.textContent = "MANUAL TAKEOVER · Agent paused";
   liveDot.style.color = "var(--magenta-steer)";
 });
@@ -495,11 +532,38 @@ chrome.runtime.onMessage.addListener((msg) => {
   const session = sessions.get(targetRunId);
   if (!session) return;
 
-  if (msg.event === "run.state_changed" && msg.payload) {
+  if (msg.event === "chat.response" && msg.payload) {
+    const replyText = String(msg.payload.text || "");
+    const model = String(msg.payload.model || "");
+    if (model && model !== "local" && model !== "error") {
+      const shortModel = model.split("/").pop() || model;
+      modelNameLabel.textContent = `NVIDIA NIM · ${shortModel}`;
+    }
+
+    const pendingIdx = session.messages.findIndex((m) => m.pending);
+    if (pendingIdx !== -1) {
+      session.messages[pendingIdx] = {
+        id: session.messages[pendingIdx].id,
+        role: "agent",
+        text: replyText,
+        pending: false,
+      };
+    } else {
+      session.messages.push({
+        id: `msg_a_${Date.now()}`,
+        role: "agent",
+        text: replyText,
+      });
+    }
+
+    if (targetRunId === activeRunId) {
+      renderChatMessages(session);
+    }
+  } else if (msg.event === "run.state_changed" && msg.payload) {
     session.state = msg.payload.new_state;
     if (msg.epoch !== undefined) session.epoch = msg.epoch;
     if (targetRunId === activeRunId) {
-      liveActionText.textContent = `State: ${session.state} · NVIDIA NIM`;
+      liveActionText.textContent = `${session.state}`;
     }
   } else if (msg.event === "action.started" && msg.action) {
     const actionId = msg.idempotency_key || `act_${Date.now()}`;
@@ -518,7 +582,6 @@ chrome.runtime.onMessage.addListener((msg) => {
       renderActivityFeed(session);
     }
   } else if (msg.event === "action.finished") {
-    // Locate the active action
     const lastActive = [...session.actions].reverse().find((a) => a.status === "active");
     if (lastActive) {
       lastActive.status = "success";
@@ -537,7 +600,7 @@ chrome.runtime.onMessage.addListener((msg) => {
     if (targetRunId === activeRunId) {
       liveDot.style.color = "var(--green-ok)";
       sessionActionStats.innerHTML = `${getMaterial3Svg("bolt", 12)} <span>${session.verifiedCount} verified</span>`;
-      liveActionText.textContent = "Verified · NVIDIA NIM ready";
+      liveActionText.textContent = "Verified";
       renderActivityFeed(session);
     }
   } else if (msg.event === "action.failed") {

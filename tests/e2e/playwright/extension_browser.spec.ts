@@ -32,6 +32,7 @@ test.describe("Extension Browser Integration E2E Tests", () => {
 
   test.afterEach(async () => {
     if (server) {
+      server.closeAllConnections?.();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
     try {
