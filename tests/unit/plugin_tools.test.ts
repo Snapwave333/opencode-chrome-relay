@@ -3,9 +3,11 @@ import { browserTools } from "../../packages/opencode-plugin/src/tools.js";
 import { RelayBrokerClient } from "../../packages/opencode-plugin/src/client.js";
 
 describe("OpenCode Plugin Browser Tools", () => {
-  it("defines all 16 required browser tools", () => {
+  it("defines all 19 required browser tools", () => {
     const requiredTools = [
       "browser_list_tabs",
+      "browser_new_tab",
+      "browser_close_tab",
       "browser_attach",
       "browser_snapshot",
       "browser_screenshot",

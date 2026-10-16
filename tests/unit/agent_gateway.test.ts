@@ -39,7 +39,7 @@ describe("AgentGateway", () => {
     const gateway = new AgentGateway({}, new FakeRelayClient());
     const names = gateway.listTools().map((tool) => tool.name);
 
-    expect(names).toHaveLength(25);
+    expect(names).toHaveLength(27);
     expect(names).toContain("browser_click");
     expect(names).toContain("browser_screenshot");
     expect(names).toContain("relay_take_over");
@@ -88,7 +88,7 @@ describe("AgentGateway", () => {
       params: { name: "browser_keypress", arguments: { key: "Enter" } },
     });
 
-    expect(manifest.tools).toHaveLength(25);
+    expect(manifest.tools).toHaveLength(27);
     expect(result.executed).toBe("browser_keypress");
   });
 

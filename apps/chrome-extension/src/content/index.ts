@@ -6,6 +6,19 @@ const dock = new InPageDock();
 
 overlay.init();
 
+function pingBackgroundWorker(): void {
+  try {
+    chrome.runtime.sendMessage({ type: "GET_BRIDGE_STATUS" }, () => {
+      const _ignore = chrome.runtime.lastError;
+    });
+  } catch {
+    // Extension context invalidated or reloading
+  }
+}
+
+pingBackgroundWorker();
+setInterval(pingBackgroundWorker, 15000);
+
 // Listen to messages from background worker
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type === "OVERLAY_ACTION_PREVIEW" && msg.action) {

@@ -28,6 +28,46 @@ export const browserTools: Record<string, ToolDefinition> = {
     },
   },
 
+  browser_new_tab: {
+    name: "browser_new_tab",
+    description: "Open a new Chrome tab, optionally at a specified URL.",
+    parameters: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "Optional URL for the new tab" },
+      },
+    },
+    execute: async (args, client) => {
+      return client.sendAction({
+        type: "browser_new_tab",
+        url: args.url,
+        risk: "non_sensitive_mutation",
+        is_irreversible: false,
+      });
+    },
+  },
+
+  browser_close_tab: {
+    name: "browser_close_tab",
+    description: "Close an authorized Chrome tab after the relay approval policy allows it.",
+    parameters: {
+      type: "object",
+      properties: {
+        tab_id: { type: "number", description: "Optional tab ID; defaults to the bound tab" },
+      },
+    },
+    execute: async (args, client) => {
+      return client.sendAction(
+        {
+          type: "browser_close_tab",
+          risk: "sensitive_action",
+          is_irreversible: true,
+        },
+        args.tab_id
+      );
+    },
+  },
+
   browser_attach: {
     name: "browser_attach",
     description: "Attach agent to a specific Chrome tab by ID.",

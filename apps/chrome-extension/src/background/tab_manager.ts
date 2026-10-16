@@ -2,6 +2,19 @@ export class TabManager {
   private attachedTabs: Set<number> = new Set();
   private activeTabId: number | null = null;
 
+  constructor() {
+    if (typeof chrome !== "undefined" && chrome.debugger?.onDetach) {
+      chrome.debugger.onDetach.addListener((source) => {
+        if (source.tabId) {
+          this.attachedTabs.delete(source.tabId);
+          if (this.activeTabId === source.tabId) {
+            this.activeTabId = null;
+          }
+        }
+      });
+    }
+  }
+
   public async attachTab(tabId: number): Promise<boolean> {
     try {
       if (this.attachedTabs.has(tabId)) {
@@ -12,7 +25,12 @@ export class TabManager {
       this.attachedTabs.add(tabId);
       this.activeTabId = tabId;
       return true;
-    } catch {
+    } catch (err: any) {
+      if (err?.message?.includes("already attached")) {
+        this.attachedTabs.add(tabId);
+        this.activeTabId = tabId;
+        return true;
+      }
       return false;
     }
   }
@@ -29,7 +47,15 @@ export class TabManager {
       }
       return true;
     } catch {
+      this.attachedTabs.delete(tabId);
       return false;
+    }
+  }
+
+  public markDetached(tabId: number): void {
+    this.attachedTabs.delete(tabId);
+    if (this.activeTabId === tabId) {
+      this.activeTabId = null;
     }
   }
 

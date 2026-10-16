@@ -8,9 +8,16 @@ declare const __NVIDIA_API_KEY__: string | undefined;
 const nativePort = new NativeBridgePort();
 const tabManager = new TabManager();
 const cdp = new CDPController();
+cdp.setOnDetachHandler((tabId) => tabManager.markDetached(tabId));
 
 // Connect to native host upon service worker startup
 nativePort.connect();
+
+if (chrome.tabs) {
+  chrome.tabs.onCreated?.addListener(() => nativePort.connect());
+  chrome.tabs.onUpdated?.addListener(() => nativePort.connect());
+  chrome.tabs.onActivated?.addListener(() => nativePort.connect());
+}
 
 // Enable 1-click access to open side panel when extension toolbar icon is clicked
 if (chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
@@ -29,6 +36,8 @@ chrome.action.onClicked.addListener(async (tab) => {
   }
 });
 
+const handledIdempotencyKeys = new Set<string>();
+
 nativePort.onMessage(async (msg: ProtocolEnvelope) => {
   if ((msg.event as string) === "extension.reload") {
     chrome.runtime.reload();
@@ -46,6 +55,16 @@ nativePort.onMessage(async (msg: ProtocolEnvelope) => {
   }
 
   if (msg.event === "action.started" && msg.action) {
+    if (msg.idempotency_key) {
+      if (handledIdempotencyKeys.has(msg.idempotency_key)) {
+        return;
+      }
+      handledIdempotencyKeys.add(msg.idempotency_key);
+      if (handledIdempotencyKeys.size > 500) {
+        const first = handledIdempotencyKeys.values().next().value;
+        if (first) handledIdempotencyKeys.delete(first);
+      }
+    }
     await handleActionRequest(msg);
   } else if (
     msg.event === "run.state_changed" &&
@@ -231,6 +250,63 @@ async function handleActionRequest(
 
   const resolvedTab = await resolveActiveTab(envelope.tab_id);
   let tabId = resolvedTab?.id;
+
+  if (action.type === "browser_status") {
+    const summary = nativePort.isConnected() ? "Relay bridge connected" : "Relay bridge reconnecting";
+    sendActionFinished(envelope, {
+      success: true,
+      verified: true,
+      bridge_connected: nativePort.isConnected(),
+      active_tab_id: tabId,
+      tab_attached: tabId ? tabManager.isAttached(tabId) : false,
+      outcome_summary: summary,
+    });
+    return { success: true, summary, tabId };
+  }
+
+  if (action.type === "browser_attach") {
+    if (!tabId) {
+      sendActionFailed(envelope, "No browser tab found to attach");
+      return { success: false, summary: "No browser tab found to attach" };
+    }
+    const attached = await tabManager.attachTab(tabId);
+    const summary = attached ? `Attached tab ${tabId}` : `Could not attach tab ${tabId}`;
+    if (attached) {
+      sendActionFinished(envelope, {
+        success: true,
+        verified: true,
+        tab_id: tabId,
+        outcome_summary: summary,
+      });
+    } else {
+      sendActionFailed(envelope, summary);
+    }
+    return { success: attached, summary, tabId };
+  }
+
+  if (action.type === "browser_detach") {
+    if (!tabId) {
+      sendActionFinished(envelope, {
+        success: true,
+        verified: true,
+        outcome_summary: "No tab was attached",
+      });
+      return { success: true, summary: "No tab was attached" };
+    }
+    const detached = await tabManager.detachTab(tabId);
+    const summary = detached ? `Detached tab ${tabId}` : `Could not detach tab ${tabId}`;
+    if (detached) {
+      sendActionFinished(envelope, {
+        success: true,
+        verified: true,
+        tab_id: tabId,
+        outcome_summary: summary,
+      });
+    } else {
+      sendActionFailed(envelope, summary);
+    }
+    return { success: detached, summary, tabId };
+  }
 
   if (action.type === "browser_close_tab") {
     if (!tabId) {
@@ -490,10 +566,47 @@ async function handleActionRequest(
       }
 
       case "browser_screenshot": {
-        let hasCdp = tabManager.isAttached(tabId);
-        if (!hasCdp) hasCdp = await tabManager.attachTab(tabId);
-        const screenshot = hasCdp ? await cdp.captureScreenshot(tabId) : "";
-        outcome = { success: true, verified: true, screenshot_base64: screenshot };
+        let base64 = "";
+        let debugError = "";
+
+        // Attempt 1: CDP captureScreenshot
+        try {
+          let hasCdp = tabManager.isAttached(tabId);
+          if (!hasCdp) hasCdp = await tabManager.attachTab(tabId);
+          if (hasCdp) {
+            base64 = await cdp.captureScreenshot(tabId);
+          }
+        } catch (e: any) {
+          debugError = `cdp: ${e?.message || e}`;
+        }
+
+        // Attempt 2: captureVisibleTab
+        if (!base64) {
+          try {
+            const tab = await chrome.tabs.get(tabId);
+            if (!tab.active) {
+              await chrome.tabs.update(tabId, { active: true });
+              await new Promise((r) => setTimeout(r, 100));
+            }
+            const dataUrl = await Promise.race([
+              chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" }),
+              new Promise<string>((_, reject) => setTimeout(() => reject(new Error("captureVisibleTab timed out")), 2000)),
+            ]);
+            if (typeof dataUrl === "string" && dataUrl.startsWith("data:image/")) {
+              base64 = dataUrl.split(",")[1] || "";
+            }
+          } catch (e: any) {
+            debugError += ` | captureVisibleTab: ${e?.message || e}`;
+          }
+        }
+
+        if (!base64) {
+          const errMsg = `Screenshot failed: ${debugError || "Unknown error"}`;
+          sendActionFailed(envelope, errMsg);
+          return { success: false, summary: errMsg, tabId };
+        }
+
+        outcome = { success: true, verified: true, screenshot_base64: base64, outcome_summary: "Captured screenshot" };
         break;
       }
 
@@ -546,7 +659,7 @@ async function handleActionRequest(
       case "browser_extract": {
         const [extRes] = await chrome.scripting.executeScript({
           target: { tabId },
-          func: (sel: string | undefined) => {
+          func: (sel: string | null) => {
             const root = (sel ? document.querySelector(sel) : document.body) as HTMLElement | null;
             if (!root) {
               return { ok: false, error: `Selector not found: ${sel}` };
@@ -567,7 +680,7 @@ async function handleActionRequest(
               links,
             };
           },
-          args: [action.locator?.selector],
+          args: [action.locator?.selector || null],
         });
         const extracted = extRes?.result as any;
         if (!extracted?.ok) {
@@ -586,35 +699,61 @@ async function handleActionRequest(
 
       case "browser_eval": {
         const code = action.text || action.value || action.predicate || "";
-        const [evalRes] = await chrome.scripting.executeScript({
-          target: { tabId },
-          func: (expr: string) => {
-            try {
-              const fn = new Function(`return (${expr})`);
-              const val = fn();
-              return { ok: true, result: val };
-            } catch {
-              try {
-                const fnBlock = new Function(expr);
-                const val = fnBlock();
-                return { ok: true, result: val };
-              } catch (err: any) {
-                return { ok: false, error: err?.message || String(err) };
-              }
-            }
-          },
-          args: [code],
-        });
-        const resObj = evalRes?.result as any;
-        if (!resObj?.ok) {
-          const errMsg = resObj?.error || "Eval failed";
-          sendActionFailed(envelope, errMsg);
-          return { success: false, summary: errMsg, tabId };
+        let evalVal: any;
+        let evalError: string | null = null;
+        let evaluated = false;
+
+        let hasCdp = tabManager.isAttached(tabId);
+        if (!hasCdp) hasCdp = await tabManager.attachTab(tabId);
+        if (hasCdp) {
+          try {
+            evalVal = await cdp.evaluate(tabId, code);
+            evaluated = true;
+          } catch (cdpErr: any) {
+            evalError = cdpErr?.message || String(cdpErr);
+          }
         }
+
+        if (!evaluated) {
+          try {
+            const [evalRes] = await chrome.scripting.executeScript({
+              target: { tabId },
+              func: (expr: string) => {
+                try {
+                  const fn = new Function(`return (${expr})`);
+                  return { ok: true, result: fn() };
+                } catch {
+                  try {
+                    const fnBlock = new Function(expr);
+                    return { ok: true, result: fnBlock() };
+                  } catch (err: any) {
+                    return { ok: false, error: err?.message || String(err) };
+                  }
+                }
+              },
+              args: [code],
+            });
+            const resObj = evalRes?.result as any;
+            if (resObj?.ok) {
+              evalVal = resObj.result;
+              evaluated = true;
+            } else {
+              evalError = resObj?.error || evalError || "Eval failed";
+            }
+          } catch (scrErr: any) {
+            evalError = scrErr?.message || evalError || "Eval failed";
+          }
+        }
+
+        if (!evaluated) {
+          sendActionFailed(envelope, evalError || "Eval failed");
+          return { success: false, summary: evalError || "Eval failed", tabId };
+        }
+
         outcome = {
           success: true,
           verified: true,
-          eval_result: resObj.result,
+          eval_result: evalVal,
           outcome_summary: `Evaluated JS expression`,
         };
         break;
@@ -654,8 +793,8 @@ async function handleActionRequest(
 
       case "browser_wait": {
         const timeoutMs = action.timeout_ms || 5000;
-        const selector = action.locator?.selector;
-        const text = action.text || action.locator?.text;
+        const selector = action.locator?.selector || null;
+        const text = action.text || action.locator?.text || null;
         if (!selector && !text) {
           await new Promise((r) => setTimeout(r, timeoutMs));
           outcome = { success: true, verified: true, outcome_summary: `Waited ${timeoutMs}ms` };
@@ -666,7 +805,7 @@ async function handleActionRequest(
         while (Date.now() - start < timeoutMs) {
           const [waitRes] = await chrome.scripting.executeScript({
             target: { tabId },
-            func: (s: string | undefined, t: string | undefined) => {
+            func: (s: string | null, t: string | null) => {
               if (s && document.querySelector(s)) return true;
               if (t && document.body?.innerText?.toLowerCase().includes(t.toLowerCase())) return true;
               return false;
@@ -690,9 +829,9 @@ async function handleActionRequest(
       case "browser_verify": {
         const [verRes] = await chrome.scripting.executeScript({
           target: { tabId },
-          func: (sel: string | undefined, txt: string) =>
+          func: (sel: string | null, txt: string) =>
             Boolean(sel ? document.querySelector(sel) : document.body.innerText.includes(txt)),
-          args: [action.locator?.selector, action.text || ""],
+          args: [action.locator?.selector || null, action.text || ""],
         });
         const verified = Boolean(verRes?.result);
         outcome = { success: verified, verified, outcome_summary: verified ? "Verified" : "Verification failed" };

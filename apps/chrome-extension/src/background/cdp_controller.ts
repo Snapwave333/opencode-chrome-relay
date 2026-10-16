@@ -1,15 +1,34 @@
 import { keyToCDPKeyEvent } from "../browser/actions.js";
 
 export class CDPController {
+  private onDetachHandler?: (tabId: number) => void;
+
+  public setOnDetachHandler(handler: (tabId: number) => void): void {
+    this.onDetachHandler = handler;
+  }
+
   public async sendCommand(tabId: number, method: string, params?: Record<string, any>): Promise<any> {
     return new Promise((resolve, reject) => {
-      chrome.debugger.sendCommand({ tabId }, method, params, (result) => {
-        if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
-        } else {
-          resolve(result);
-        }
-      });
+      const timer = setTimeout(() => {
+        reject(new Error(`CDP command ${method} timed out`));
+      }, 5000);
+      try {
+        chrome.debugger.sendCommand({ tabId }, method, params || {}, (result) => {
+          clearTimeout(timer);
+          if (chrome.runtime.lastError) {
+            const errStr = chrome.runtime.lastError.message || "CDP error";
+            if (/not attached/i.test(errStr) && this.onDetachHandler) {
+              this.onDetachHandler(tabId);
+            }
+            reject(new Error(errStr));
+          } else {
+            resolve(result);
+          }
+        });
+      } catch (err) {
+        clearTimeout(timer);
+        reject(err);
+      }
     });
   }
 
@@ -67,8 +86,15 @@ export class CDPController {
   }
 
   public async captureScreenshot(tabId: number): Promise<string> {
-    const result = await this.sendCommand(tabId, "Page.captureScreenshot", { format: "png" });
-    return result?.data || "";
+    try {
+      await this.sendCommand(tabId, "Page.enable");
+    } catch {}
+    try {
+      const result = await this.sendCommand(tabId, "Page.captureScreenshot", { format: "png", fromSurface: true });
+      if (result?.data) return result.data;
+    } catch {}
+    const fallback = await this.sendCommand(tabId, "Page.captureScreenshot", { format: "png" });
+    return fallback?.data || "";
   }
 
   public async evaluate(tabId: number, expression: string): Promise<any> {

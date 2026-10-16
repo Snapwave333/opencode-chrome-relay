@@ -7,8 +7,10 @@ export class NativeBridgePort {
   private messageListeners: ((msg: any) => void)[] = [];
   private disconnectListeners: (() => void)[] = [];
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private keepAliveInterval: ReturnType<typeof setInterval> | null = null;
 
   public connect(): boolean {
+    this.startKeepAlive();
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
       return true;
     }
@@ -57,6 +59,38 @@ export class NativeBridgePort {
       this.ws = null;
       return this.connectNativeFallback();
     }
+  }
+
+  private startKeepAlive(): void {
+    if (this.keepAliveInterval) return;
+    this.keepAliveInterval = setInterval(() => {
+      try {
+        if (typeof chrome !== "undefined" && chrome.runtime?.getPlatformInfo) {
+          chrome.runtime.getPlatformInfo(() => {
+            // Resets MV3 Service Worker 30s idle timer
+          });
+        }
+      } catch {
+        // Ignore
+      }
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        try {
+          this.ws.send(
+            JSON.stringify({
+              v: 1,
+              event: "bridge.heartbeat",
+              event_id: `hb_${Date.now()}`,
+              timestamp: new Date().toISOString(),
+              payload: { from_extension: true },
+            })
+          );
+        } catch {
+          // Ignore
+        }
+      } else {
+        this.connect();
+      }
+    }, 15000);
   }
 
   private connectNativeFallback(): boolean {

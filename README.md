@@ -9,7 +9,7 @@ Browser-native agent cockpit and provider-neutral agent gateway for controlling 
 - **Enforced Execution Controls**: Guaranteed **PAUSE**, **STOP**, **RESTART**, **STEER**, and **MANUAL TAKE OVER** semantics with monotonic epoch cancellation fencing.
 - **In-Page Action Overlay**: Target soft-outlines, click pulses, typing captions, and state badges in an isolated Shadow DOM.
 - **Durable Action Journal**: SQLite-backed audit log, tab lease management, and idempotency protection against duplicate replays.
-- **17 Browser Tools**: Full suite of semantic locator tools (`browser_click`, `browser_type`, `browser_snapshot`, `browser_navigate`, `browser_wait`, etc.).
+- **19 Browser Tools**: Full suite of semantic locator tools (`browser_click`, `browser_type`, `browser_snapshot`, `browser_navigate`, `browser_wait`, etc.).
 - **Global Agent Gateway**: MCP and JSONL transports let any compatible AI agent use the same authorized browser-control pipeline.
 - **Pipeline Execution**: Run up to 25 ordered browser operations with correlated results and configurable fail-fast behavior.
 
@@ -20,7 +20,7 @@ Browser-native agent cockpit and provider-neutral agent gateway for controlling 
 - **`apps/chrome-extension`**: Manifest V3 extension with Side Panel cockpit and Shadow DOM overlays.
 - **`crates/relay-broker`**: Rust scheduler, SQLite journal, cancellation gate, and authenticated loopback IPC.
 - **`crates/relay-native-host`**: Native Messaging stdio host connecting Chrome to the broker.
-- **`packages/opencode-plugin`**: OpenCode plugin exporting the 17 browser tools.
+- **`packages/opencode-plugin`**: OpenCode plugin exporting the 19 browser tools.
 - **`packages/agent-gateway`**: Provider-neutral MCP server, JSONL bridge, capability manifest, execution controls, and pipeline runner.
 - **`packages/protocol`**: Shared TypeScript types and Zod schemas.
 - **`installer/windows`**: Windows installer scripts for Native Messaging registration.

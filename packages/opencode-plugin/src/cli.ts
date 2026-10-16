@@ -129,7 +129,6 @@ export async function ensureBrokerConnected(url = DEFAULT_BROKER_URL): Promise<W
   let ws = await tryConnectBroker(url, 1200);
   if (ws) return ws;
 
-  // Auto-start relay-broker.exe if present on disk
   const exePath = fs.existsSync(BROKER_EXE_DEBUG)
     ? BROKER_EXE_DEBUG
     : fs.existsSync(BROKER_EXE_RELEASE)
@@ -146,7 +145,6 @@ export async function ensureBrokerConnected(url = DEFAULT_BROKER_URL): Promise<W
       });
       child.unref();
     } catch {
-      // Ignore spawn error
     }
     for (let attempt = 0; attempt < 6; attempt++) {
       await new Promise((r) => setTimeout(r, 350));
@@ -179,7 +177,20 @@ export async function executeRelayAction(
   };
 
   return new Promise((resolve, reject) => {
+    const retryInterval = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(
+          JSON.stringify({
+            ...envelope,
+            event: "action.started",
+            timestamp: new Date().toISOString(),
+          })
+        );
+      }
+    }, 1500);
+
     const timer = setTimeout(() => {
+      clearInterval(retryInterval);
       ws.close();
       reject(
         new Error(
@@ -194,16 +205,17 @@ export async function executeRelayAction(
         if (msg.idempotency_key !== idempotencyKey) return;
 
         if (msg.event === "action.finished") {
+          clearInterval(retryInterval);
           clearTimeout(timer);
           ws.close();
           resolve(msg.payload || { success: true });
         } else if (msg.event === "action.failed") {
+          clearInterval(retryInterval);
           clearTimeout(timer);
           ws.close();
           reject(new Error(msg.payload?.error || `Action ${action.type} failed`));
         }
       } catch {
-        // Ignore non-JSON frame
       }
     });
 
@@ -262,7 +274,6 @@ async function runAutonomousAgentFromCli(goal: string, options: CliOptions): Pro
           resolve();
         }
       } catch {
-        // Ignore malformed
       }
     });
 
@@ -306,7 +317,6 @@ async function printStatusAndJournal(options: CliOptions): Promise<void> {
       dbActions = db.prepare("SELECT * FROM action_journal ORDER BY created_at DESC LIMIT 15").all();
       db.close();
     } catch {
-      // node:sqlite optional
     }
   }
 
@@ -637,14 +647,16 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
         is_irreversible: false,
       };
       const res = await executeRelayAction(action, options);
-      const outPath = path.resolve(process.cwd(), positionals[0] || "screenshot.png");
-      if (res?.screenshot_base64) {
-        fs.writeFileSync(outPath, Buffer.from(res.screenshot_base64, "base64"));
+      if (!res?.screenshot_base64) {
+        throw new Error(res?.error || "Screenshot capture returned no image data");
       }
+      const outPath = path.resolve(process.cwd(), positionals[0] || "screenshot.png");
+      fs.writeFileSync(outPath, Buffer.from(res.screenshot_base64, "base64"));
+      const bytes = Buffer.byteLength(res.screenshot_base64, "base64");
       if (options.json) {
-        console.log(JSON.stringify({ success: true, file: outPath, bytes: res?.screenshot_base64?.length || 0 }));
+        console.log(JSON.stringify({ success: true, file: outPath, bytes }));
       } else {
-        console.log(`📸 Screenshot saved to ${outPath}`);
+        console.log(`📸 Screenshot saved to ${outPath} (${bytes} bytes)`);
       }
       return;
     }
@@ -728,7 +740,6 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
   }
 }
 
-// Run when invoked directly as a CLI binary
 const isMain =
   process.argv[1] &&
   (path.resolve(process.argv[1]) === path.resolve(__filename) ||
