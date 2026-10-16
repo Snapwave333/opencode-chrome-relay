@@ -180,7 +180,8 @@ impl Scheduler {
 
         // Check tab lease if tab specified
         if let Some(tab_id) = envelope.tab_id {
-            let lease_id = envelope.lease_id.as_deref().unwrap_or("default_lease");
+            let fallback_lease = format!("lease_{}_{}", tab_id, run_id);
+            let lease_id = envelope.lease_id.as_deref().unwrap_or(&fallback_lease);
             let leased = self
                 .db
                 .acquire_tab_lease(lease_id, tab_id, run_id, 300)
