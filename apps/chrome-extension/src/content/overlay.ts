@@ -1,4 +1,4 @@
-import { OVERLAY_CONTAINER_ID, COLORS } from "../shared/constants.js";
+import { OVERLAY_CONTAINER_ID, COLORS, M3_COLORS } from "../shared/constants.js";
 import { ActionPayload } from "@opencode/chrome-relay-protocol";
 import { resolveElementLocator } from "../browser/locators.js";
 import { getMaterial3Svg, Material3IconName } from "../shared/material_icons.js";
@@ -31,74 +31,76 @@ export class ActionOverlay {
     style.textContent = `
       * { box-sizing: border-box; }
 
-      /* Target Outline Box */
+      /* Target Outline Box (M3 Elevation & Cyan Glow) */
       .highlight-box {
         position: absolute;
         box-sizing: border-box;
-        border: 2px solid ${COLORS.cyanPrimary};
-        border-radius: 5px;
-        background: rgba(0, 212, 255, 0.12);
-        box-shadow: 0 0 12px rgba(0, 212, 255, 0.45);
-        transition: all 0.14s cubic-bezier(0.16, 1, 0.3, 1);
+        border: 2px solid ${M3_COLORS.primary};
+        border-radius: 8px;
+        background: rgba(128, 213, 232, 0.12);
+        box-shadow: 0 0 16px rgba(128, 213, 232, 0.35);
+        transition: all 0.22s cubic-bezier(0.05, 0.7, 0.1, 1);
         pointer-events: none;
         display: none;
       }
       .highlight-box.type-mode {
-        border-color: ${COLORS.cyanPrimary};
-        background: rgba(0, 212, 255, 0.18);
+        border-color: ${M3_COLORS.primary};
+        background: rgba(128, 213, 232, 0.18);
         border-style: dashed;
       }
       .highlight-box.verified {
-        border-color: ${COLORS.successGreen};
-        background: rgba(46, 160, 67, 0.16);
-        box-shadow: 0 0 14px rgba(46, 160, 67, 0.5);
+        border-color: ${M3_COLORS.success};
+        background: rgba(124, 217, 146, 0.16);
+        box-shadow: 0 0 18px rgba(124, 217, 146, 0.5);
       }
       .highlight-box.failed {
-        border-color: ${COLORS.errorRed};
-        background: rgba(248, 81, 73, 0.16);
-        box-shadow: 0 0 14px rgba(248, 81, 73, 0.5);
+        border-color: ${M3_COLORS.error};
+        background: rgba(255, 180, 171, 0.16);
+        box-shadow: 0 0 18px rgba(255, 180, 171, 0.5);
       }
 
-      /* Target Action Caption Badge */
+      /* Target Action Caption Badge: M3 Pill Chip */
       .caption-badge {
         position: absolute;
         display: none;
         align-items: center;
-        gap: 5px;
-        padding: 4px 10px;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+        gap: 6px;
+        padding: 5px 12px;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
         font-size: 11.5px;
         font-weight: 600;
-        letter-spacing: 0.2px;
-        color: #ffffff;
-        background: #0d1117;
-        border: 1px solid ${COLORS.cyanPrimary};
-        border-radius: 4px;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.6);
+        letter-spacing: 0.15px;
+        color: ${M3_COLORS.onSurface};
+        background: ${M3_COLORS.surfaceContainer};
+        border: 1px solid ${M3_COLORS.primary};
+        border-radius: 9999px;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.65), 0 0 10px rgba(128, 213, 232, 0.25);
         white-space: nowrap;
         pointer-events: none;
         transform: translateY(-100%);
-        margin-top: -6px;
-        transition: opacity 0.12s ease;
+        margin-top: -8px;
+        transition: all 0.16s ease;
       }
       .caption-badge.verified {
-        border-color: ${COLORS.successGreen};
-        color: ${COLORS.successGreen};
+        border-color: ${M3_COLORS.success};
+        color: ${M3_COLORS.success};
+        background: ${M3_COLORS.surfaceContainerHigh};
       }
       .caption-badge.failed {
-        border-color: ${COLORS.errorRed};
-        color: ${COLORS.errorRed};
+        border-color: ${M3_COLORS.error};
+        color: ${M3_COLORS.error};
+        background: ${M3_COLORS.surfaceContainerHigh};
       }
 
-      /* Localized Click Ripple */
+      /* Localized Click Ripple: M3 Spring Expansion */
       .click-ripple {
         position: absolute;
         border-radius: 50%;
-        background: radial-gradient(circle, rgba(0,212,255,0.7) 0%, rgba(0,212,255,0) 70%);
+        background: radial-gradient(circle, rgba(128, 213, 232, 0.85) 0%, rgba(128, 213, 232, 0) 70%);
         pointer-events: none;
         display: none;
         transform: translate(-50%, -50%) scale(0);
-        animation: rippleEffect 0.42s cubic-bezier(0, 0.7, 0.1, 1) forwards;
+        animation: rippleEffect 0.45s cubic-bezier(0.05, 0.7, 0.1, 1) forwards;
       }
       @keyframes rippleEffect {
         0% { transform: translate(-50%, -50%) scale(0.2); opacity: 0.95; }
@@ -112,29 +114,30 @@ export class ActionOverlay {
         left: 0;
         height: 3px;
         width: 0%;
-        background: linear-gradient(90deg, ${COLORS.cyanPrimary}, #79c0ff);
-        box-shadow: 0 0 10px ${COLORS.cyanPrimary};
+        background: linear-gradient(90deg, ${M3_COLORS.primary}, ${M3_COLORS.onPrimaryContainer});
+        box-shadow: 0 0 10px ${M3_COLORS.primary};
         pointer-events: none;
         transition: width 0.3s ease;
         display: none;
         z-index: 2147483647;
       }
 
-      /* Edge Scroll Direction Marker */
+      /* Edge Scroll Direction Marker: M3 Floating Pill Badge */
       .edge-scroll-marker {
         position: fixed;
         display: none;
         align-items: center;
+        gap: 6px;
         justify-content: center;
-        background: #0d1117;
-        border: 1px solid ${COLORS.cyanPrimary};
-        color: ${COLORS.cyanPrimary};
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", monospace;
-        font-size: 13px;
-        font-weight: 700;
+        background: ${M3_COLORS.surfaceContainer};
+        border: 1px solid ${M3_COLORS.primary};
+        color: ${M3_COLORS.primary};
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        font-size: 12.5px;
+        font-weight: 600;
         padding: 6px 14px;
-        border-radius: 20px;
-        box-shadow: 0 4px 16px rgba(0, 212, 255, 0.35);
+        border-radius: 9999px;
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.55), 0 0 12px rgba(128, 213, 232, 0.3);
         pointer-events: none;
         z-index: 2147483647;
       }
@@ -147,21 +150,21 @@ export class ActionOverlay {
         display: none;
         align-items: center;
         gap: 8px;
-        background: #161b22;
-        border: 1px solid ${COLORS.cyanPrimary};
-        color: #ffffff;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: ${M3_COLORS.surfaceContainerHigh};
+        border: 1px solid ${M3_COLORS.primary};
+        color: ${M3_COLORS.onSurface};
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
         font-size: 12px;
-        padding: 8px 14px;
-        border-radius: 6px;
-        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.7);
+        padding: 8px 16px;
+        border-radius: 12px;
+        box-shadow: 0 8px 28px rgba(0, 0, 0, 0.7);
         pointer-events: none;
         z-index: 2147483647;
-        animation: toastFadeIn 0.2s ease;
+        animation: toastFadeIn 0.22s cubic-bezier(0.05, 0.7, 0.1, 1);
       }
       @keyframes toastFadeIn {
-        from { opacity: 0; transform: translateY(10px); }
-        to { opacity: 1; transform: translateY(0); }
+        from { opacity: 0; transform: translateY(12px) scale(0.95); }
+        to { opacity: 1; transform: translateY(0) scale(1); }
       }
 
       /* Scanning Sweep Line (Vision Inspection) */
@@ -169,14 +172,14 @@ export class ActionOverlay {
         position: absolute;
         height: 2px;
         width: 100%;
-        background: linear-gradient(90deg, transparent, ${COLORS.cyanPrimary}, transparent);
-        box-shadow: 0 0 8px ${COLORS.cyanPrimary};
+        background: linear-gradient(90deg, transparent, ${M3_COLORS.primary}, transparent);
+        box-shadow: 0 0 10px ${M3_COLORS.primary};
         display: none;
         animation: scanSweep 1.2s infinite ease-in-out;
       }
       @keyframes scanSweep {
         0% { top: 0%; opacity: 0.2; }
-        50% { opacity: 0.9; }
+        50% { opacity: 0.95; }
         100% { top: 100%; opacity: 0.2; }
       }
     `;

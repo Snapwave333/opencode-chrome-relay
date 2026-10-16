@@ -1,4 +1,4 @@
-import { DOCK_CONTAINER_ID, COLORS } from "../shared/constants.js";
+import { DOCK_CONTAINER_ID, COLORS, M3_COLORS } from "../shared/constants.js";
 import { getMaterial3Svg } from "../shared/material_icons.js";
 
 export class InPageDock {
@@ -13,7 +13,7 @@ export class InPageDock {
     this.container = document.createElement("div");
     this.container.id = DOCK_CONTAINER_ID;
     this.container.style.cssText =
-      "position: fixed; bottom: 20px; right: 20px; z-index: 2147483646; pointer-events: auto;";
+      "position: fixed; bottom: 24px; right: 24px; z-index: 2147483646; pointer-events: auto;";
 
     this.shadow = this.container.attachShadow({ mode: "closed" });
 
@@ -22,47 +22,76 @@ export class InPageDock {
       .dock-bar {
         display: flex;
         align-items: center;
-        gap: 6px;
-        background: ${COLORS.surfaceDark};
-        border: 1px solid ${COLORS.borderDark};
-        padding: 6px 10px;
-        border-radius: 6px;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.4);
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        gap: 8px;
+        background: rgba(27, 34, 37, 0.88);
+        backdrop-filter: blur(16px);
+        -webkit-backdrop-filter: blur(16px);
+        border: 1px solid rgba(137, 147, 150, 0.28);
+        padding: 6px 12px;
+        border-radius: 9999px;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.65), 0 0 16px rgba(128, 213, 232, 0.2);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       }
       .dock-btn {
-        background: transparent;
-        color: ${COLORS.textDark};
-        border: 1px solid ${COLORS.borderDark};
-        padding: 4px 8px;
+        background: ${M3_COLORS.surfaceContainerHigh};
+        color: ${M3_COLORS.onSurface};
+        border: 1px solid rgba(137, 147, 150, 0.25);
+        padding: 6px 12px;
         font-size: 11px;
-        font-weight: 600;
-        border-radius: 4px;
+        font-weight: 700;
+        letter-spacing: 0.3px;
+        border-radius: 9999px;
         cursor: pointer;
-        transition: all 0.1s ease;
+        transition: all 0.22s cubic-bezier(0.05, 0.7, 0.1, 1);
         display: inline-flex;
         align-items: center;
-        gap: 4px;
+        gap: 5px;
       }
       .dock-btn:hover {
-        background: ${COLORS.borderDark};
-        color: #fff;
+        transform: translateY(-1px) scale(1.02);
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
       }
-      .btn-pause { border-color: ${COLORS.cyanPrimary}; color: ${COLORS.cyanPrimary}; }
-      .btn-stop { border-color: ${COLORS.errorRed}; color: ${COLORS.errorRed}; }
-      .btn-steer { border-color: ${COLORS.magentaSteer}; color: ${COLORS.magentaSteer}; }
+      .btn-pause {
+        border-color: rgba(255, 183, 77, 0.4);
+        color: #ffb74d;
+        background: rgba(255, 183, 77, 0.12);
+      }
+      .btn-pause:hover {
+        background: rgba(255, 183, 77, 0.24);
+      }
+      .btn-stop {
+        border-color: rgba(255, 180, 171, 0.4);
+        color: ${M3_COLORS.error};
+        background: rgba(255, 180, 171, 0.12);
+      }
+      .btn-stop:hover {
+        background: ${M3_COLORS.errorContainer};
+        color: #ffffff;
+      }
+      .btn-steer {
+        border: none;
+        color: ${M3_COLORS.onTertiaryContainer};
+        background: ${M3_COLORS.tertiaryContainer};
+      }
+      .btn-steer:hover {
+        background: ${M3_COLORS.tertiary};
+        color: ${M3_COLORS.onTertiary};
+      }
       .dismiss-btn {
         background: none;
         border: none;
-        color: ${COLORS.textMuted};
+        color: ${M3_COLORS.onSurfaceVariant};
         cursor: pointer;
-        padding: 2px 4px;
+        padding: 4px;
+        border-radius: 9999px;
         display: inline-flex;
         align-items: center;
         justify-content: center;
+        transition: all 0.15s ease;
       }
       .dismiss-btn:hover {
-        color: #fff;
+        background: rgba(137, 147, 150, 0.2);
+        color: ${M3_COLORS.onSurface};
       }
     `;
 
