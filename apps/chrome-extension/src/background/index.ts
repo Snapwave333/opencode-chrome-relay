@@ -42,13 +42,65 @@ nativePort.onMessage(async (msg: ProtocolEnvelope) => {
   }
 });
 
+const KNOWN_SITES: Array<{ pattern: RegExp; url: string }> = [
+  { pattern: /\b(google\s+cloud(\s+console|\s+consuil|\s+platform)?|gcp(\s+console)?)\b/i, url: "https://console.cloud.google.com" },
+  { pattern: /\b(gmail|google\s+mail)\b/i, url: "https://mail.google.com" },
+  { pattern: /\b(google\s+drive|gdrive)\b/i, url: "https://drive.google.com" },
+  { pattern: /\b(google\s+docs)\b/i, url: "https://docs.google.com" },
+  { pattern: /\b(google\s+sheets)\b/i, url: "https://sheets.google.com" },
+  { pattern: /\b(google\s+calendar|gcal)\b/i, url: "https://calendar.google.com" },
+  { pattern: /\b(google\s+maps)\b/i, url: "https://maps.google.com" },
+  { pattern: /\b(youtube\s+studio|yt\s+studio)\b/i, url: "https://studio.youtube.com" },
+  { pattern: /\b(youtube|yt)\b/i, url: "https://www.youtube.com" },
+  { pattern: /\b(github)\b/i, url: "https://github.com" },
+  { pattern: /\b(gitlab)\b/i, url: "https://gitlab.com" },
+  { pattern: /\b(aws(\s+console|\s+management\s+console)?)\b/i, url: "https://console.aws.amazon.com" },
+  { pattern: /\b(azure(\s+portal)?)\b/i, url: "https://portal.azure.com" },
+  { pattern: /\b(cloudflare(\s+dashboard|\s+console)?)\b/i, url: "https://dash.cloudflare.com" },
+  { pattern: /\b(vercel(\s+dashboard)?)\b/i, url: "https://vercel.com/dashboard" },
+  { pattern: /\b(netlify)\b/i, url: "https://app.netlify.com" },
+  { pattern: /\b(supabase(\s+dashboard)?)\b/i, url: "https://supabase.com/dashboard" },
+  { pattern: /\b(openai(\s+platform)?)\b/i, url: "https://platform.openai.com" },
+  { pattern: /\b(chatgpt)\b/i, url: "https://chatgpt.com" },
+  { pattern: /\b(claude)\b/i, url: "https://claude.ai" },
+  { pattern: /\b(nvidia\s+nim|build\s+nvidia)\b/i, url: "https://build.nvidia.com" },
+  { pattern: /\b(hacker\s*news|hn)\b/i, url: "https://news.ycombinator.com" },
+  { pattern: /\b(reddit)\b/i, url: "https://www.reddit.com" },
+  { pattern: /\b(twitter|x\.com)\b/i, url: "https://x.com" },
+  { pattern: /\b(linkedin)\b/i, url: "https://www.linkedin.com" },
+  { pattern: /\b(stack\s*overflow)\b/i, url: "https://stackoverflow.com" },
+  { pattern: /\b(google)\b/i, url: "https://www.google.com" },
+];
+
 function normalizeUrl(rawUrl: string): string {
-  const trimmed = rawUrl.trim();
-  if (/^https?:\/\//i.test(trimmed)) return trimmed;
-  if (/^[a-z0-9-]+(\.[a-z0-9-]+)+([/?#].*)?$/i.test(trimmed)) {
-    return `https://${trimmed}`;
+  // Convert spoken/typed "dot com" / "dot org" / "dot io" -> ".com" / ".org" / ".io"
+  const cleaned = rawUrl
+    .trim()
+    .replace(/\s+dot\s+(com|org|net|io|ai|dev|edu|gov|co)\b/gi, ".$1")
+    .replace(/[?.!,;]+$/, "")
+    .trim();
+
+  if (/^https?:\/\//i.test(cleaned)) return cleaned;
+  if (/^localhost(:\d+)?(\/.*)?$/i.test(cleaned) || /^127\.0\.0\.1(:\d+)?(\/.*)?$/i.test(cleaned)) {
+    return `http://${cleaned}`;
   }
-  return `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`;
+  if (/^[a-z0-9-]+(\.[a-z0-9-]+)+([/?#].*)?$/i.test(cleaned)) {
+    return `https://${cleaned}`;
+  }
+
+  for (const entry of KNOWN_SITES) {
+    if (entry.pattern.test(cleaned)) {
+      return entry.url;
+    }
+  }
+
+  // Single word like "example" or "stripe" -> https://www.<word>.com
+  const stripped = cleaned.replace(/^(?:my|the|our)\s+/i, "").trim();
+  if (/^[a-z0-9-]+$/i.test(stripped)) {
+    return `https://www.${stripped.toLowerCase()}.com`;
+  }
+
+  return `https://www.google.com/search?q=${encodeURIComponent(stripped || cleaned)}`;
 }
 
 async function resolveActiveTab(preferredTabId?: number | null): Promise<chrome.tabs.Tab | null> {
@@ -558,23 +610,22 @@ function extractBalancedJsonObjects(text: string): Array<{ raw: string; parsed: 
 function inferActionFromUserIntent(userText: string): ActionPayload | null {
   const trimmed = userText.trim();
 
-  // Direct URL or domain (e.g. "https://example.com" or "google.com")
-  if (/^https?:\/\/[^\s]+$/i.test(trimmed) || /^[a-z0-9-]+(\.[a-z0-9-]+)+(\/[^\s]*)?$/i.test(trimmed)) {
-    return { type: "browser_navigate", url: normalizeUrl(trimmed) } as ActionPayload;
+  // Direct URL, domain, or spoken "example dot com"
+  const dotNormalized = trimmed.replace(/\s+dot\s+(com|org|net|io|ai|dev|edu|gov|co)\b/gi, ".$1");
+  if (
+    /^https?:\/\/[^\s]+$/i.test(dotNormalized) ||
+    /^[a-z0-9-]+(\.[a-z0-9-]+)+(\/[^\s]*)?$/i.test(dotNormalized)
+  ) {
+    return { type: "browser_navigate", url: normalizeUrl(dotNormalized) } as ActionPayload;
   }
 
-  // Natural language navigation: "navigate to X", "go to X", "open X", "visit X"
+  // Natural language navigation (single or multi-word): "navigate to my Google cloud consuil", "go to example dot com", "open github"
   const navMatch = trimmed.match(
-    /^(?:please\s+|can\s+you\s+)?(?:navigate|navagate|go|open|visit|browse|head)\s+(?:to\s+)?([^\s,]+)$/i
+    /^(?:please\s+|can\s+you\s+|could\s+you\s+)?(?:navigate|navagate|nav|go|open|visit|browse|head|take\s+me|switch|load|launch)\s+(?:to\s+|up\s+|into\s+)?(.+?)[?.!]*$/i
   );
   if (navMatch && navMatch[1]) {
-    let target = navMatch[1].replace(/[?.!]+$/, "");
-    if (!/^https?:\/\//i.test(target) && !target.includes(".")) {
-      target = `https://www.${target.toLowerCase()}.com`;
-    } else {
-      target = normalizeUrl(target);
-    }
-    return { type: "browser_navigate", url: target } as ActionPayload;
+    const rawTarget = navMatch[1].trim();
+    return { type: "browser_navigate", url: normalizeUrl(rawTarget) } as ActionPayload;
   }
 
   // Natural language search: "search for X" or "search google for X"
@@ -584,6 +635,18 @@ function inferActionFromUserIntent(userText: string): ActionPayload | null {
     return {
       type: "browser_navigate",
       url: `https://www.google.com/search?q=${encodeURIComponent(query)}`,
+    } as ActionPayload;
+  }
+
+  // Natural language click: "click [on] [the] X"
+  const clickMatch = trimmed.match(/^(?:please\s+)?click\s+(?:on\s+)?(?:the\s+)?(.+?)[?.!]*$/i);
+  if (clickMatch && clickMatch[1]) {
+    const targetName = clickMatch[1].replace(/^["']|["']$/g, "").trim();
+    return {
+      type: "browser_click",
+      locator: targetName.startsWith("#") || targetName.startsWith(".")
+        ? { selector: targetName }
+        : { name: targetName },
     } as ActionPayload;
   }
 
@@ -641,9 +704,25 @@ function extractActionAndCleanReply(
     action = { ...action, type: `browser_${action.type}` as any };
   }
 
-  // 4. Deterministic fallback if user explicitly asked to navigate/search/scroll
+  // 4. If user had navigation intent and LLM wrote an https:// URL in prose/markdown without JSON, extract it
+  if (!action && /\b(navigate|navagate|nav|go|open|visit|browse|take\s+me|launch|load)\b/i.test(userText)) {
+    const urlInReply = replyText.match(/https?:\/\/[^\s)"'`>\]]+/i);
+    if (urlInReply && urlInReply[0]) {
+      action = { type: "browser_navigate", url: urlInReply[0].replace(/[.,;]+$/, "") } as ActionPayload;
+    }
+  }
+
+  // 5. Deterministic fallback if user explicitly asked to navigate/search/click/scroll
   if (!action) {
     action = inferActionFromUserIntent(userText);
+  }
+
+  // 6. If we resolved a browser action, suppress any false LLM refusal text ("I cannot open websites...")
+  if (action && /\b(cannot|can't|unable|don't have access|as an ai|do not have the ability)\b/i.test(cleanReply)) {
+    cleanReply =
+      action.type === "browser_navigate"
+        ? `Navigating to ${action.url}...`
+        : `Executing ${action.type}...`;
   }
 
   return { cleanReply, action };
@@ -680,11 +759,11 @@ async function handleUserChat(
     }
 
     const systemPrompt = [
-      "You are the OpenCode Chrome Relay browser agent inside the Chrome Side Panel.",
+      "You are the OpenCode Chrome Relay browser automation agent running inside the user's Chrome Side Panel with full permission to control their active browser tab.",
       tabContext,
-      "Keep replies concise, direct, and helpful without filler or boilerplate.",
-      "Whenever the user asks to navigate, open a website, search, click, type, or scroll, you MUST include a JSON block at the end of your reply in this exact format:",
-      '```json\n{"action":{"type":"browser_navigate","url":"https://example.com"}}\n```',
+      "Keep replies concise (1 sentence) without filler.",
+      "CRITICAL: NEVER refuse to navigate to a website or user console (such as 'my Google Cloud Console', 'my Gmail', 'GitHub', etc.). Always resolve the destination to its canonical URL (even if the user has typos like 'navagate to my Google cloud consuil' -> 'https://console.cloud.google.com', or 'example dot com' -> 'https://example.com') and include the JSON action block at the end of your reply:",
+      '```json\n{"action":{"type":"browser_navigate","url":"https://console.cloud.google.com"}}\n```',
       'Supported action types: "browser_navigate" (with "url"), "browser_click" (with "locator":{"selector":"...","name":"..."}), "browser_type" (with "locator":{"selector":"..."},"text":"..."), "browser_scroll" (with "scroll_direction":"down"|"up","scroll_amount":400).',
       "For normal chat or questions (like 'ping'), reply in plain text without any JSON block.",
     ].join("\n");
