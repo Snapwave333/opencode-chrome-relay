@@ -493,6 +493,7 @@ function submitChatMessage(): void {
     command: "steer",
     run_id: current.runId,
     epoch: current.epoch,
+    tab_id: current.tabId,
     instruction: text,
     history: [...historySnapshot, { role: "user", text }],
   });

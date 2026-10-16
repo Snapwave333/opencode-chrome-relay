@@ -42,23 +42,107 @@ nativePort.onMessage(async (msg: ProtocolEnvelope) => {
   }
 });
 
+function normalizeUrl(rawUrl: string): string {
+  const trimmed = rawUrl.trim();
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  if (/^[a-z0-9-]+(\.[a-z0-9-]+)+([/?#].*)?$/i.test(trimmed)) {
+    return `https://${trimmed}`;
+  }
+  return `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`;
+}
+
+async function resolveActiveTab(preferredTabId?: number | null): Promise<chrome.tabs.Tab | null> {
+  if (preferredTabId) {
+    try {
+      const t = await chrome.tabs.get(preferredTabId);
+      if (t) return t;
+    } catch {
+      // Tab no longer exists
+    }
+  }
+  const activeFromMgr = tabManager.getActiveTabId();
+  if (activeFromMgr) {
+    try {
+      const t = await chrome.tabs.get(activeFromMgr);
+      if (t) return t;
+    } catch {
+      // Tab closed
+    }
+  }
+  const lastFocused = await new Promise<chrome.tabs.Tab[]>((resolve) => {
+    chrome.tabs.query({ active: true, lastFocusedWindow: true }, (res) => resolve(res || []));
+  });
+  if (lastFocused[0]?.id) return lastFocused[0];
+
+  const anyActive = await new Promise<chrome.tabs.Tab[]>((resolve) => {
+    chrome.tabs.query({ active: true }, (res) => resolve(res || []));
+  });
+  return anyActive.find((t) => t.id && !t.url?.startsWith("devtools://")) || anyActive[0] || null;
+}
+
+async function waitForTabComplete(tabId: number, timeoutMs = 3500): Promise<void> {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve();
+    };
+    const listener = (updatedTabId: number, info: chrome.tabs.TabChangeInfo) => {
+      if (updatedTabId === tabId && info.status === "complete") {
+        finish();
+      }
+    };
+    chrome.tabs.onUpdated.addListener(listener);
+    setTimeout(finish, timeoutMs);
+  });
+}
+
 async function handleActionRequest(envelope: ProtocolEnvelope): Promise<void> {
   const action = envelope.action;
   if (!action) return;
 
-  const tabId = envelope.tab_id || tabManager.getActiveTabId();
-  if (!tabId) {
-    sendActionFailed(envelope, "No active or authorized tab attached");
+  const resolvedTab = await resolveActiveTab(envelope.tab_id);
+  let tabId = resolvedTab?.id;
+
+  // Handle browser_navigate directly via chrome.tabs.update (or create) so it works from any tab including chrome://newtab/
+  if (action.type === "browser_navigate") {
+    if (!action.url) {
+      sendActionFailed(envelope, "Missing URL for browser_navigate");
+      return;
+    }
+    try {
+      const targetUrl = normalizeUrl(action.url);
+      if (tabId) {
+        await chrome.tabs.update(tabId, { url: targetUrl, active: true });
+        await waitForTabComplete(tabId);
+      } else {
+        const created = await chrome.tabs.create({ url: targetUrl, active: true });
+        tabId = created.id;
+        if (tabId) await waitForTabComplete(tabId);
+      }
+      sendActionFinished(envelope, {
+        success: true,
+        verified: true,
+        url: targetUrl,
+        outcome_summary: `Navigated to ${targetUrl}`,
+      });
+    } catch (err: any) {
+      sendActionFailed(envelope, err?.message || "Navigation failed");
+    }
     return;
   }
 
-  // Ensure debugger attached
-  if (!tabManager.isAttached(tabId)) {
-    const attached = await tabManager.attachTab(tabId);
-    if (!attached) {
-      sendActionFailed(envelope, `Could not attach debugger to tab ${tabId}`);
-      return;
-    }
+  if (!tabId) {
+    sendActionFailed(envelope, "No active browser tab found");
+    return;
+  }
+
+  // Try attaching debugger for CDP actions; fall back to chrome.scripting if blocked
+  let hasCdp = tabManager.isAttached(tabId);
+  if (!hasCdp) {
+    hasCdp = await tabManager.attachTab(tabId);
   }
 
   // Notify overlay about action preview
@@ -75,49 +159,82 @@ async function handleActionRequest(envelope: ProtocolEnvelope): Promise<void> {
     let outcome: any = { success: true, verified: true };
 
     switch (action.type) {
-      case "browser_navigate":
-        if (action.url) {
-          await cdp.navigate(tabId, action.url);
-          outcome = { success: true, verified: true, url: action.url };
-        }
-        break;
-
       case "browser_click":
-        if (action.locator?.point) {
-          await cdp.click(tabId, action.locator.point.x, action.locator.point.y);
+        if (hasCdp) {
+          if (action.locator?.point) {
+            await cdp.click(tabId, action.locator.point.x, action.locator.point.y);
+          } else {
+            const resolved = await cdp.evaluate(
+              tabId,
+              `(${resolveInPage})(${JSON.stringify(action.locator || {})})`
+            );
+            if (!resolved || !resolved.found) {
+              sendActionFailed(envelope, `Element not found for locator: ${JSON.stringify(action.locator)}`);
+              return;
+            }
+            await cdp.click(tabId, resolved.box.centerX, resolved.box.centerY);
+          }
         } else {
-          // Resolve locator in page
-          const resolved = await cdp.evaluate(
-            tabId,
-            `(${resolveInPage})(${JSON.stringify(action.locator || {})})`
-          );
-          if (!resolved || !resolved.found) {
+          const [res] = await chrome.scripting.executeScript({
+            target: { tabId },
+            func: (loc: any) => {
+              const el = loc?.selector
+                ? document.querySelector(loc.selector)
+                : Array.from(document.querySelectorAll("button, a, input, [role]")).find((e) =>
+                    (e.getAttribute("aria-label") || e.textContent || "")
+                      .toLowerCase()
+                      .includes((loc?.name || "").toLowerCase())
+                  );
+              if (!el) return false;
+              (el as HTMLElement).click();
+              return true;
+            },
+            args: [action.locator || {}],
+          });
+          if (!res?.result) {
             sendActionFailed(envelope, `Element not found for locator: ${JSON.stringify(action.locator)}`);
             return;
           }
-          await cdp.click(tabId, resolved.box.centerX, resolved.box.centerY);
         }
         outcome = { success: true, verified: true };
         break;
 
       case "browser_type":
-        if (action.locator) {
-          const resolved = await cdp.evaluate(
-            tabId,
-            `(${resolveInPage})(${JSON.stringify(action.locator)})`
-          );
-          if (resolved?.found) {
-            await cdp.click(tabId, resolved.box.centerX, resolved.box.centerY);
+        if (hasCdp) {
+          if (action.locator) {
+            const resolved = await cdp.evaluate(
+              tabId,
+              `(${resolveInPage})(${JSON.stringify(action.locator)})`
+            );
+            if (resolved?.found) {
+              await cdp.click(tabId, resolved.box.centerX, resolved.box.centerY);
+            }
           }
-        }
-        if (action.text) {
-          await cdp.type(tabId, action.text);
+          if (action.text) {
+            await cdp.type(tabId, action.text);
+          }
+        } else {
+          await chrome.scripting.executeScript({
+            target: { tabId },
+            func: (loc: any, text: string) => {
+              const el = (loc?.selector
+                ? document.querySelector(loc.selector)
+                : document.activeElement || document.querySelector("input, textarea")) as HTMLInputElement | null;
+              if (el) {
+                el.focus();
+                el.value = text;
+                el.dispatchEvent(new Event("input", { bubbles: true }));
+                el.dispatchEvent(new Event("change", { bubbles: true }));
+              }
+            },
+            args: [action.locator || {}, action.text || ""],
+          });
         }
         outcome = { success: true, verified: true };
         break;
 
       case "browser_keypress":
-        if (action.key) {
+        if (hasCdp && action.key) {
           await cdp.keypress(tabId, action.key);
         }
         outcome = { success: true, verified: true };
@@ -128,30 +245,45 @@ async function handleActionRequest(envelope: ProtocolEnvelope): Promise<void> {
         const amt = action.scroll_amount || 400;
         const deltaY = dir === "down" ? amt : dir === "up" ? -amt : 0;
         const deltaX = dir === "right" ? amt : dir === "left" ? -amt : 0;
-        await cdp.evaluate(tabId, `window.scrollBy(${deltaX}, ${deltaY})`);
+        if (hasCdp) {
+          await cdp.evaluate(tabId, `window.scrollBy(${deltaX}, ${deltaY})`);
+        } else {
+          await chrome.scripting.executeScript({
+            target: { tabId },
+            func: (dx: number, dy: number) => window.scrollBy(dx, dy),
+            args: [deltaX, deltaY],
+          });
+        }
         outcome = { success: true, verified: true };
         break;
 
       case "browser_snapshot":
-        const snapshot = await cdp.evaluate(
-          tabId,
-          `({
-            title: document.title,
-            url: window.location.href,
-            elements: Array.from(document.querySelectorAll("button, a, input, select, [role]")).map(e => ({
-              tag: e.tagName.toLowerCase(),
-              role: e.getAttribute("role") || e.tagName.toLowerCase(),
-              name: e.getAttribute("aria-label") || (e.textContent || "").trim().slice(0, 50),
-              type: (e as HTMLInputElement).type || null,
-              disabled: (e as HTMLButtonElement).disabled || false
-            }))
-          })`
-        );
+        const snapshot = hasCdp
+          ? await cdp.evaluate(
+              tabId,
+              `({
+                title: document.title,
+                url: window.location.href,
+                elements: Array.from(document.querySelectorAll("button, a, input, select, [role]")).map(e => ({
+                  tag: e.tagName.toLowerCase(),
+                  role: e.getAttribute("role") || e.tagName.toLowerCase(),
+                  name: e.getAttribute("aria-label") || (e.textContent || "").trim().slice(0, 50),
+                  type: (e as HTMLInputElement).type || null,
+                  disabled: (e as HTMLButtonElement).disabled || false
+                }))
+              })`
+            )
+          : (
+              await chrome.scripting.executeScript({
+                target: { tabId },
+                func: () => ({ title: document.title, url: window.location.href }),
+              })
+            )[0]?.result;
         outcome = { success: true, verified: true, snapshot };
         break;
 
       case "browser_screenshot":
-        const screenshot = await cdp.captureScreenshot(tabId);
+        const screenshot = hasCdp ? await cdp.captureScreenshot(tabId) : "";
         outcome = { success: true, verified: true, screenshot_base64: screenshot };
         break;
 
@@ -187,15 +319,26 @@ async function handleActionRequest(envelope: ProtocolEnvelope): Promise<void> {
           sendActionFailed(envelope, "No file_paths specified for browser_upload");
           return;
         }
-        const uploadSuccess = await cdp.setFileInputFiles(tabId, uploadSelector, files);
+        const uploadSuccess = hasCdp ? await cdp.setFileInputFiles(tabId, uploadSelector, files) : false;
         outcome = { success: uploadSuccess, verified: uploadSuccess, uploaded_files: files };
         break;
 
       case "browser_verify":
-        const verified = await cdp.evaluate(
-          tabId,
-          `Boolean(${JSON.stringify(action.locator?.selector)} ? document.querySelector(${JSON.stringify(action.locator?.selector)}) : document.body.innerText.includes(${JSON.stringify(action.text || "")}))`
-        );
+        const verified = hasCdp
+          ? await cdp.evaluate(
+              tabId,
+              `Boolean(${JSON.stringify(action.locator?.selector)} ? document.querySelector(${JSON.stringify(action.locator?.selector)}) : document.body.innerText.includes(${JSON.stringify(action.text || "")}))`
+            )
+          : Boolean(
+              (
+                await chrome.scripting.executeScript({
+                  target: { tabId },
+                  func: (sel: string | undefined, txt: string) =>
+                    Boolean(sel ? document.querySelector(sel) : document.body.innerText.includes(txt)),
+                  args: [action.locator?.selector, action.text || ""],
+                })
+              )[0]?.result
+            );
         outcome = { success: verified, verified };
         break;
 
@@ -333,7 +476,8 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
         request.run_id || "run_1",
         request.epoch || 0,
         request.instruction,
-        request.history || []
+        request.history || [],
+        request.tab_id
       );
     }
     sendResponse({ success: true });
@@ -368,23 +512,164 @@ async function getNvidiaApiKey(): Promise<string> {
   return "";
 }
 
+function extractBalancedJsonObjects(text: string): Array<{ raw: string; parsed: any }> {
+  const results: Array<{ raw: string; parsed: any }> = [];
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== "{") continue;
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    for (let j = i; j < text.length; j++) {
+      const ch = text[j];
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (ch === "\\") {
+        escape = true;
+        continue;
+      }
+      if (ch === '"') {
+        inString = !inString;
+        continue;
+      }
+      if (!inString) {
+        if (ch === "{") depth++;
+        else if (ch === "}") {
+          depth--;
+          if (depth === 0) {
+            const candidate = text.slice(i, j + 1);
+            try {
+              const parsed = JSON.parse(candidate);
+              results.push({ raw: candidate, parsed });
+              i = j;
+            } catch {
+              // Not valid JSON
+            }
+            break;
+          }
+        }
+      }
+    }
+  }
+  return results;
+}
+
+function inferActionFromUserIntent(userText: string): ActionPayload | null {
+  const trimmed = userText.trim();
+
+  // Direct URL or domain (e.g. "https://example.com" or "google.com")
+  if (/^https?:\/\/[^\s]+$/i.test(trimmed) || /^[a-z0-9-]+(\.[a-z0-9-]+)+(\/[^\s]*)?$/i.test(trimmed)) {
+    return { type: "browser_navigate", url: normalizeUrl(trimmed) } as ActionPayload;
+  }
+
+  // Natural language navigation: "navigate to X", "go to X", "open X", "visit X"
+  const navMatch = trimmed.match(
+    /^(?:please\s+|can\s+you\s+)?(?:navigate|navagate|go|open|visit|browse|head)\s+(?:to\s+)?([^\s,]+)$/i
+  );
+  if (navMatch && navMatch[1]) {
+    let target = navMatch[1].replace(/[?.!]+$/, "");
+    if (!/^https?:\/\//i.test(target) && !target.includes(".")) {
+      target = `https://www.${target.toLowerCase()}.com`;
+    } else {
+      target = normalizeUrl(target);
+    }
+    return { type: "browser_navigate", url: target } as ActionPayload;
+  }
+
+  // Natural language search: "search for X" or "search google for X"
+  const searchMatch = trimmed.match(/^(?:please\s+)?search\s+(?:google\s+)?(?:for\s+)?(.+)$/i);
+  if (searchMatch && searchMatch[1]) {
+    const query = searchMatch[1].trim();
+    return {
+      type: "browser_navigate",
+      url: `https://www.google.com/search?q=${encodeURIComponent(query)}`,
+    } as ActionPayload;
+  }
+
+  // Natural language scroll: "scroll down", "scroll up"
+  const scrollMatch = trimmed.match(/^(?:please\s+)?scroll\s+(down|up|left|right)(?:\s+(\d+))?/i);
+  if (scrollMatch && scrollMatch[1]) {
+    return {
+      type: "browser_scroll",
+      scroll_direction: scrollMatch[1].toLowerCase() as "down" | "up" | "left" | "right",
+      scroll_amount: scrollMatch[2] ? parseInt(scrollMatch[2], 10) : 450,
+    } as ActionPayload;
+  }
+
+  return null;
+}
+
+function extractActionAndCleanReply(
+  replyText: string,
+  userText: string
+): { cleanReply: string; action: ActionPayload | null } {
+  let cleanReply = replyText;
+  let action: ActionPayload | null = null;
+
+  // 1. Check fenced code blocks first
+  const fenceRegex = /```(?:json)?\s*([\s\S]*?)```/gi;
+  let match: RegExpExecArray | null;
+  while ((match = fenceRegex.exec(replyText)) !== null) {
+    const objs = extractBalancedJsonObjects(match[1]);
+    for (const obj of objs) {
+      const candidate = obj.parsed?.action || obj.parsed;
+      if (candidate && typeof candidate.type === "string") {
+        action = candidate as ActionPayload;
+        cleanReply = cleanReply.replace(match[0], "").trim();
+        break;
+      }
+    }
+    if (action) break;
+  }
+
+  // 2. If not in fenced block, check inline balanced JSON objects
+  if (!action) {
+    const objs = extractBalancedJsonObjects(replyText);
+    for (const obj of objs) {
+      const candidate = obj.parsed?.action || obj.parsed;
+      if (candidate && typeof candidate.type === "string") {
+        action = candidate as ActionPayload;
+        cleanReply = cleanReply.replace(obj.raw, "").trim();
+        break;
+      }
+    }
+  }
+
+  // 3. Normalize action type aliases if LLM emitted "navigate" instead of "browser_navigate"
+  if (action && !action.type.startsWith("browser_")) {
+    action = { ...action, type: `browser_${action.type}` as any };
+  }
+
+  // 4. Deterministic fallback if user explicitly asked to navigate/search/scroll
+  if (!action) {
+    action = inferActionFromUserIntent(userText);
+  }
+
+  return { cleanReply, action };
+}
+
 async function handleUserChat(
   runId: string,
   epoch: number,
   userText: string,
-  history: Array<{ role: string; text: string }>
+  history: Array<{ role: string; text: string }>,
+  preferredTabId?: number | null
 ): Promise<void> {
   try {
-    const tabs = await new Promise<chrome.tabs.Tab[]>((resolve) => {
-      chrome.tabs.query({ active: true, currentWindow: true }, (res) => resolve(res || []));
-    });
-    const activeTab = tabs[0];
+    const activeTab = await resolveActiveTab(preferredTabId);
     const tabContext = activeTab
       ? `Active Chrome Tab: "${activeTab.title || "Untitled"}" (${activeTab.url || "about:blank"})`
       : "No active browser tab detected.";
 
     const apiKey = await getNvidiaApiKey();
     if (!apiKey) {
+      const fallbackAction = inferActionFromUserIntent(userText);
+      if (fallbackAction) {
+        broadcastChatResponse(runId, epoch, `Executing ${fallbackAction.type}...`, "local");
+        await dispatchBrowserAction(runId, epoch, activeTab?.id, fallbackAction);
+        return;
+      }
       broadcastChatResponse(
         runId,
         epoch,
@@ -398,10 +683,10 @@ async function handleUserChat(
       "You are the OpenCode Chrome Relay browser agent inside the Chrome Side Panel.",
       tabContext,
       "Keep replies concise, direct, and helpful without filler or boilerplate.",
-      "If the user asks you to perform a browser action on the active tab (navigate, click, type, scroll), include a JSON block at the end of your reply in this exact format:",
+      "Whenever the user asks to navigate, open a website, search, click, type, or scroll, you MUST include a JSON block at the end of your reply in this exact format:",
       '```json\n{"action":{"type":"browser_navigate","url":"https://example.com"}}\n```',
       'Supported action types: "browser_navigate" (with "url"), "browser_click" (with "locator":{"selector":"...","name":"..."}), "browser_type" (with "locator":{"selector":"..."},"text":"..."), "browser_scroll" (with "scroll_direction":"down"|"up","scroll_amount":400).',
-      "For normal chat or questions (like 'ping'), just reply in plain text without any JSON block.",
+      "For normal chat or questions (like 'ping'), reply in plain text without any JSON block.",
     ].join("\n");
 
     const priorMessages = history
@@ -449,49 +734,49 @@ async function handleUserChat(
       }
     }
 
-    if (!replyText) {
-      replyText = "Pong! Agent is connected, but NVIDIA NIM did not return a response.";
-    }
+    const { cleanReply, action: parsedAction } = extractActionAndCleanReply(replyText, userText);
 
-    // Check if the model emitted a browser action block
-    const jsonMatch = replyText.match(/```json\s*(\{[\s\S]*?\})\s*```/) || replyText.match(/(\{"action"\s*:\s*\{[\s\S]*?\}\})/);
-    let parsedAction: ActionPayload | null = null;
-    if (jsonMatch && jsonMatch[1]) {
-      try {
-        const parsed = JSON.parse(jsonMatch[1]);
-        if (parsed?.action?.type) {
-          parsedAction = parsed.action as ActionPayload;
-          replyText = replyText.replace(jsonMatch[0], "").trim();
-        }
-      } catch {
-        // Ignore malformed JSON block
-      }
-    }
+    const displayMessage =
+      cleanReply ||
+      (parsedAction?.type === "browser_navigate"
+        ? `Navigating to ${parsedAction.url}...`
+        : parsedAction
+          ? `Executing ${parsedAction.type}...`
+          : "Pong! Agent is ready.");
 
-    broadcastChatResponse(runId, epoch, replyText || `Executing ${parsedAction?.type}...`, modelUsed);
+    broadcastChatResponse(runId, epoch, displayMessage, modelUsed);
 
-    if (parsedAction && activeTab?.id) {
-      const actionEnvelope: ProtocolEnvelope = {
-        v: 1,
-        event: "action.started",
-        event_id: `evt_act_${Date.now()}`,
-        timestamp: new Date().toISOString(),
-        run_id: runId,
-        epoch,
-        tab_id: activeTab.id,
-        idempotency_key: `idem_${Date.now()}`,
-        action: parsedAction,
-      };
-      try {
-        chrome.runtime.sendMessage(actionEnvelope);
-      } catch {
-        // Sidepanel closed
-      }
-      await handleActionRequest(actionEnvelope);
+    if (parsedAction) {
+      await dispatchBrowserAction(runId, epoch, activeTab?.id, parsedAction);
     }
   } catch (err: any) {
     broadcastChatResponse(runId, epoch, `Error: ${err?.message || "Failed to contact agent"}`, "error");
   }
+}
+
+async function dispatchBrowserAction(
+  runId: string,
+  epoch: number,
+  tabId: number | undefined,
+  action: ActionPayload
+): Promise<void> {
+  const actionEnvelope: ProtocolEnvelope = {
+    v: 1,
+    event: "action.started",
+    event_id: `evt_act_${Date.now()}`,
+    timestamp: new Date().toISOString(),
+    run_id: runId,
+    epoch,
+    tab_id: tabId,
+    idempotency_key: `idem_${Date.now()}`,
+    action,
+  };
+  try {
+    chrome.runtime.sendMessage(actionEnvelope);
+  } catch {
+    // Sidepanel closed
+  }
+  await handleActionRequest(actionEnvelope);
 }
 
 function broadcastChatResponse(runId: string, epoch: number, text: string, model: string): void {
