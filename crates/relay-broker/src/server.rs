@@ -126,7 +126,7 @@ async fn handle_connection(
                                     }
                                 }
                             } else if let Ok(envelope) = serde_json::from_value::<ProtocolEnvelope>(parsed.clone()) {
-                                if envelope.event == "browser.action.request" || envelope.action.is_some() {
+                                if envelope.event == "browser.action.request" {
                                     match scheduler.submit_action(&envelope) {
                                         Ok(policy) => {
                                             let resp = serde_json::json!({
@@ -137,6 +137,7 @@ async fn handle_connection(
                                                 "epoch": envelope.epoch,
                                                 "sequence": envelope.sequence,
                                                 "idempotency_key": envelope.idempotency_key,
+                                                "action": envelope.action,
                                                 "payload": {
                                                     "requires_approval": policy.requires_approval,
                                                     "is_forbidden": policy.is_forbidden,
@@ -160,6 +161,20 @@ async fn handle_connection(
                                             ws_sender.send(tokio_tungstenite::tungstenite::Message::Text(err_resp.to_string())).await?;
                                         }
                                     }
+                                } else if envelope.event == "action.started" {
+                                    let _ = scheduler.submit_action(&envelope);
+                                    let _ = event_tx.send(text.to_string());
+                                } else if envelope.event == "action.finished" || envelope.event == "action.failed" {
+                                    if let Some(idem) = envelope.idempotency_key.as_deref() {
+                                        let is_ok = envelope.event == "action.finished";
+                                        let outcome_str = envelope
+                                            .payload
+                                            .as_ref()
+                                            .map(|v| v.to_string())
+                                            .unwrap_or_else(|| "{}".to_string());
+                                        let _ = scheduler.complete_action(idem, is_ok, is_ok, &outcome_str);
+                                    }
+                                    let _ = event_tx.send(text.to_string());
                                 } else if envelope.event == "session.create" {
                                     let run_id = envelope.run_id.unwrap_or_else(|| format!("run_{}", uuid::Uuid::new_v4()));
                                     let name = envelope.payload.as_ref().and_then(|p| p.get("name")).and_then(|n| n.as_str());

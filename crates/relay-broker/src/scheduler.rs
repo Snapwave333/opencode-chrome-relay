@@ -139,6 +139,7 @@ impl Scheduler {
     }
 
     pub fn handle_control(&self, cmd: &ControlCommand) -> Result<ExecutionState, String> {
+        let _ = self.get_or_create_session(&cmd.run_id);
         let mut map = self.sessions.lock().unwrap();
         let session = map
             .get_mut(&cmd.run_id)
@@ -160,7 +161,7 @@ impl Scheduler {
 
     pub fn submit_action(&self, envelope: &ProtocolEnvelope) -> Result<PolicyResult, String> {
         let run_id = envelope.run_id.as_deref().ok_or("Missing run_id")?;
-        let epoch = envelope.epoch.ok_or("Missing epoch")?;
+        let epoch = envelope.epoch.unwrap_or(0);
         let sequence = envelope.sequence.unwrap_or(0);
         let idempotency_key = envelope
             .idempotency_key
@@ -168,6 +169,7 @@ impl Scheduler {
             .ok_or("Missing idempotency_key")?;
         let action = envelope.action.as_ref().ok_or("Missing action")?;
 
+        let _ = self.get_or_create_session(run_id);
         let mut map = self.sessions.lock().unwrap();
         let session = map
             .get_mut(run_id)

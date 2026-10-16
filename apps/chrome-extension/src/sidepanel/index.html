@@ -2,80 +2,103 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
   <title>OpenCode Chrome Relay</title>
   <link rel="stylesheet" href="sidepanel.css">
 </head>
 <body class="theme-dark">
+  <a class="skip-link" href="#timeline">Skip to activity</a>
   <div class="cockpit-container">
     <!-- Header -->
     <header class="cockpit-header">
       <div class="header-left">
-        <span class="logo-title">OpenCode Relay</span>
-        <span id="bridge-status-badge" class="status-badge connected">● Connected</span>
+        <span class="brand-mark" aria-hidden="true">R</span>
+        <div class="brand-copy">
+          <span class="logo-title">OpenCode Relay</span>
+          <span class="logo-subtitle">Browser agent console</span>
+        </div>
       </div>
       <div class="header-right">
-        <span class="model-badge"><strong id="model-name">NVIDIA NIM</strong></span>
+        <span id="bridge-status-badge" class="status-badge connected" role="status" aria-live="polite"><span class="status-dot" aria-hidden="true"></span><span id="bridge-status-text">Connected</span></span>
+        <span class="model-badge"><span>Model</span><strong id="model-name">NVIDIA NIM</strong></span>
       </div>
     </header>
 
     <!-- Session Tabs Bar -->
-    <div class="session-tabs-bar">
-      <div class="tabs-scroll-container" id="tabs-list">
+    <nav class="session-tabs-bar" aria-label="Agent sessions">
+      <div class="tabs-scroll-container" id="tabs-list" role="tablist">
         <!-- Dynamic tabs injected by sidepanel.ts -->
       </div>
-      <button id="btn-new-session" class="btn-tab-action" title="Create New Session">+ New</button>
-    </div>
+      <button id="btn-new-session" class="btn-tab-action" title="Create new session" aria-label="Create new session">+ New</button>
+    </nav>
 
     <!-- Compact Active Session Bar -->
-    <div class="session-bar">
+    <section class="session-bar" aria-label="Active session">
       <div class="session-info">
-        <strong id="session-name">Task 1</strong>
-        <span class="meta-sep">·</span>
-        <span id="tab-status">Active Tab</span>
-        <span id="session-pin-status" class="pin-status-tag" title="Click to toggle pin status">Unpinned</span>
+        <div class="session-title-group">
+          <strong id="session-name">Task 1</strong>
+          <span id="tab-status">No tab attached</span>
+        </div>
+        <button id="session-pin-status" class="pin-status-tag" type="button" title="Toggle pin status">Unpinned</button>
         <span id="session-action-stats" class="action-stats-badge" title="Verified actions count">0 verified</span>
       </div>
       <div class="session-actions">
         <button id="btn-toggle-pin" class="btn-xs" title="Pin session to keep across closes">Pin</button>
-        <button id="btn-attach-tab" class="btn-xs">Attach</button>
+        <button id="btn-attach-tab" class="btn-xs">Attach tab</button>
         <button id="btn-delete-session" class="btn-xs btn-danger" title="Delete session">Delete</button>
       </div>
-    </div>
+    </section>
 
     <!-- Timeline & Chat View -->
-    <main class="timeline-container" id="timeline">
-      <div class="chat-messages" id="chat-messages"></div>
+    <main class="timeline-container" id="timeline" tabindex="-1">
+      <div class="chat-messages" id="chat-messages" aria-live="polite"></div>
 
       <!-- Live Action Status Indicator & Activity Feed (only shown when browser actions run) -->
-      <div class="live-action-box" id="live-action-box" style="display: none;">
+      <section class="live-action-box" id="live-action-box" style="display: none;" aria-live="polite">
         <div class="live-status-header">
           <span class="pulsing-dot" id="live-dot">◉</span>
           <span id="live-action-text">Ready</span>
         </div>
         <div class="activity-feed" id="activity-feed"></div>
-      </div>
+      </section>
     </main>
 
     <!-- Primary Control Deck -->
     <footer class="cockpit-footer">
       <div class="steer-controls">
-        <input type="text" id="steer-input" placeholder="Message agent or enter browser instruction..." autocomplete="off" />
-        <button id="btn-steer-send" class="btn-steer">SEND</button>
+        <textarea id="steer-input" rows="1" maxlength="4000" placeholder="Ask the agent to act in this tab…" aria-label="Message or browser instruction"></textarea>
+        <button id="btn-steer-send" class="btn-steer" disabled>Send</button>
       </div>
+      <div class="composer-meta"><span>Enter to send · Shift+Enter for a new line</span><span id="composer-count">0 / 4000</span></div>
 
-      <div class="primary-controls">
+      <div class="primary-controls" role="toolbar" aria-label="Execution controls">
         <button id="btn-pause" class="btn-ctrl btn-pause">PAUSE</button>
         <button id="btn-stop" class="btn-ctrl btn-stop">STOP</button>
         <button id="btn-restart" class="btn-ctrl btn-restart">RESTART</button>
+        <button id="btn-take-over" class="btn-ctrl btn-take-over">TAKE OVER</button>
       </div>
 
       <div class="secondary-controls" style="display: none;">
-        <button id="btn-take-over" class="btn-sm">TAKE OVER</button>
         <button id="btn-approvals" class="btn-sm">APPROVALS (0)</button>
         <button id="btn-history" class="btn-sm">HISTORY</button>
       </div>
     </footer>
   </div>
+
+  <div id="panel-notice" class="panel-notice" role="status" aria-live="polite" aria-atomic="true"></div>
+
+  <dialog id="delete-dialog" class="confirm-dialog">
+    <form method="dialog">
+      <span class="dialog-eyebrow">Remove session</span>
+      <h2 id="delete-dialog-title">Delete this session?</h2>
+      <p id="delete-dialog-copy">Its local conversation and activity history will be removed.</p>
+      <div class="dialog-actions">
+        <button value="cancel" class="dialog-button">Cancel</button>
+        <button value="confirm" class="dialog-button danger">Delete session</button>
+      </div>
+    </form>
+  </dialog>
 
   <script src="sidepanel.js"></script>
 </body>

@@ -30,6 +30,14 @@ chrome.action.onClicked.addListener(async (tab) => {
 });
 
 nativePort.onMessage(async (msg: ProtocolEnvelope) => {
+  if ((msg.event as string) === "extension.reload") {
+    chrome.runtime.reload();
+    return;
+  }
+  if ((msg.payload as any)?.from_extension) {
+    return;
+  }
+
   // Broadcast to sidepanel and open extension views
   try {
     chrome.runtime.sendMessage(msg);
@@ -44,7 +52,7 @@ nativePort.onMessage(async (msg: ProtocolEnvelope) => {
 
 const KNOWN_SITES: Array<{ pattern: RegExp; url: string }> = [
   {
-    pattern: /\b(oauth|credential|client\s+secret|client\s+id|api\s+key).*\b(google\s+cloud|gcp|youtube)\b|\b(google\s+cloud|gcp).*\b(oauth|credential|client\s+secret|client\s+id|api\s+key)\b/i,
+    pattern: /\b(oauth|credentials?|client\s+secret|client\s+id|api\s+keys?|admin\s+privileges?|scopes?)\b/i,
     url: "https://console.cloud.google.com/apis/credentials",
   },
   {
@@ -629,7 +637,7 @@ function sendActionFinished(envelope: ProtocolEnvelope, outcome: any): void {
     sequence: envelope.sequence,
     idempotency_key: envelope.idempotency_key,
     action: envelope.action,
-    payload: outcome,
+    payload: { ...outcome, from_extension: true },
   };
 
   try {
@@ -665,7 +673,7 @@ function sendActionFailed(envelope: ProtocolEnvelope, error: string): void {
     sequence: envelope.sequence,
     idempotency_key: envelope.idempotency_key,
     action: envelope.action,
-    payload: { error },
+    payload: { error, from_extension: true },
   };
 
   try {
@@ -709,12 +717,15 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
       epoch: request.epoch,
       instruction: request.instruction,
     });
-    if (request.command === "stop" || request.command === "take_over") {
+    if (request.command === "stop") {
       const current = activeRuns.get(runId);
       if (current) current.status = "stopped";
-    } else if (request.command === "pause") {
+    } else if (request.command === "pause" || request.command === "take_over") {
       const current = activeRuns.get(runId);
       if (current) current.status = "paused";
+    } else if (request.command === "resume" || request.command === "return_control") {
+      const current = activeRuns.get(runId);
+      if (current) current.status = "running";
     } else if (request.command === "restart") {
       const current = activeRuns.get(runId);
       if (current) current.status = "stopped";
@@ -733,6 +744,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
       v: 1,
       event: request.event,
       event_id: `evt_sess_${Date.now()}`,
+      timestamp: new Date().toISOString(),
       run_id: request.run_id,
       payload: request.payload,
     });
@@ -741,9 +753,9 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
 });
 
 const ACTIVE_NIM_MODELS = [
-  "poolside/laguna-xs-2.1",
-  "openai/gpt-oss-20b",
   "nvidia/nemotron-3-super-120b-a12b",
+  "openai/gpt-oss-20b",
+  "poolside/laguna-xs-2.1",
 ];
 
 async function getNvidiaApiKey(): Promise<string> {
@@ -958,13 +970,13 @@ async function callNvidiaNim(
           model,
           messages,
           temperature: 0.15,
-          max_tokens: 450,
+          max_tokens: 1500,
         }),
       });
       if (!res.ok) continue;
       const data: any = await res.json();
       const msg = data?.choices?.[0]?.message;
-      const content = (msg?.content || msg?.reasoning_content || "").trim();
+      const content = (msg?.content || "").trim();
       if (content) {
         return { content, modelUsed: model };
       }
@@ -1151,12 +1163,14 @@ async function dispatchBrowserAction(
     tab_id: tabId,
     idempotency_key: `idem_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     action,
+    payload: { from_extension: true },
   };
   try {
     chrome.runtime.sendMessage(actionEnvelope);
   } catch {
     // Sidepanel closed
   }
+  nativePort.send(actionEnvelope);
   return await handleActionRequest(actionEnvelope);
 }
 
@@ -1171,6 +1185,7 @@ function broadcastChatResponse(runId: string, epoch: number, text: string, model
     payload: {
       text,
       model,
+      from_extension: true,
     },
   };
   try {
@@ -1178,4 +1193,5 @@ function broadcastChatResponse(runId: string, epoch: number, text: string, model
   } catch {
     // Sidepanel closed
   }
+  nativePort.send(envelope);
 }

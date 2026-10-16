@@ -1,4 +1,5 @@
 export const NATIVE_HOST_NAME = "com.opencode.chrome_relay";
+export const DEFAULT_BROKER_URL = "ws://127.0.0.1:4098";
 
 export const OVERLAY_CONTAINER_ID = "opencode-relay-overlay-root";
 export const DOCK_CONTAINER_ID = "opencode-relay-dock-root";

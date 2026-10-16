@@ -33,6 +33,7 @@ interface SessionData {
 }
 
 const statusBadge = document.getElementById("bridge-status-badge") as HTMLElement;
+const statusText = document.getElementById("bridge-status-text") as HTMLElement;
 const modelNameLabel = document.getElementById("model-name") as HTMLElement;
 const tabsList = document.getElementById("tabs-list") as HTMLDivElement;
 const btnNewSession = document.getElementById("btn-new-session") as HTMLButtonElement;
@@ -54,8 +55,12 @@ const btnPause = document.getElementById("btn-pause") as HTMLButtonElement;
 const btnStop = document.getElementById("btn-stop") as HTMLButtonElement;
 const btnRestart = document.getElementById("btn-restart") as HTMLButtonElement;
 const btnSteer = document.getElementById("btn-steer-send") as HTMLButtonElement;
-const steerInput = document.getElementById("steer-input") as HTMLInputElement;
+const steerInput = document.getElementById("steer-input") as HTMLTextAreaElement;
 const btnTakeOver = document.getElementById("btn-take-over") as HTMLButtonElement;
+const composerCount = document.getElementById("composer-count") as HTMLElement;
+const panelNotice = document.getElementById("panel-notice") as HTMLElement;
+const deleteDialog = document.getElementById("delete-dialog") as HTMLDialogElement;
+const deleteDialogTitle = document.getElementById("delete-dialog-title") as HTMLElement;
 
 // Sessions state
 const sessions: Map<string, SessionData> = new Map();
@@ -83,6 +88,7 @@ btnPause.innerHTML = `${getMaterial3Svg("pause", 12)} <span>PAUSE</span>`;
 btnStop.innerHTML = `${getMaterial3Svg("stop", 12)} <span>STOP</span>`;
 btnRestart.innerHTML = `${getMaterial3Svg("restart_alt", 12)} <span>RESTART</span>`;
 btnSteer.innerHTML = `${getMaterial3Svg("send", 12)} <span>SEND</span>`;
+btnTakeOver.innerHTML = `${getMaterial3Svg("touch_app", 12)} <span>TAKE OVER</span>`;
 
 renderTabs();
 updateActiveSessionDisplay();
@@ -90,11 +96,11 @@ updateActiveSessionDisplay();
 // Query bridge status from background
 chrome.runtime.sendMessage({ type: "GET_BRIDGE_STATUS" }, (response) => {
   if (response?.connected) {
-    statusBadge.textContent = "● Connected";
+    statusText.textContent = "Connected";
     statusBadge.className = "status-badge connected";
   } else {
-    statusBadge.textContent = "● Ready";
-    statusBadge.className = "status-badge connected";
+    statusText.textContent = "Offline";
+    statusBadge.className = "status-badge disconnected";
   }
 });
 
@@ -105,17 +111,31 @@ function renderTabs(): void {
     const tabEl = document.createElement("div");
     tabEl.className = `session-tab ${session.runId === activeRunId ? "active" : ""}`;
     tabEl.title = `${session.name} (${session.isPinned ? "Pinned" : "Unpinned"})`;
+    tabEl.role = "tab";
+    tabEl.tabIndex = session.runId === activeRunId ? 0 : -1;
+    tabEl.setAttribute("aria-selected", String(session.runId === activeRunId));
     tabEl.onclick = () => switchSession(session.runId);
+    tabEl.onkeydown = (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        switchSession(session.runId);
+      }
+    };
 
     const titleSpan = document.createElement("span");
     titleSpan.textContent = session.name;
 
-    const pinIndicator = document.createElement("span");
+    const pinIndicator = document.createElement("button");
+    pinIndicator.type = "button";
     pinIndicator.className = "tab-pin-indicator";
     pinIndicator.innerHTML = session.isPinned
       ? getMaterial3Svg("push_pin", 12)
       : getMaterial3Svg("push_pin_outline", 12);
     pinIndicator.title = session.isPinned ? "Pinned" : "Unpinned";
+    pinIndicator.setAttribute(
+      "aria-label",
+      session.isPinned ? `Unpin ${session.name}` : `Pin ${session.name}`
+    );
     pinIndicator.onclick = (e) => {
       e.stopPropagation();
       togglePin(session.runId);
@@ -127,6 +147,7 @@ function renderTabs(): void {
     closeBtn.title = session.isPinned
       ? "Pinned session (unpin first to close)"
       : "Close session";
+    closeBtn.setAttribute("aria-label", `Close ${session.name}`);
     closeBtn.onclick = (e) => {
       e.stopPropagation();
       closeSession(session.runId);
@@ -159,7 +180,7 @@ function updateActiveSessionDisplay(): void {
   if (!current) return;
 
   sessionNameText.textContent = current.name;
-  tabStatusText.textContent = current.tabId ? `Tab ${current.tabId}` : "Active Tab";
+  tabStatusText.textContent = current.tabId ? `Attached to tab ${current.tabId}` : "No tab attached";
 
   if (current.isPinned) {
     sessionPinStatus.innerHTML = `${getMaterial3Svg("push_pin", 12)} <span>Pinned</span>`;
@@ -173,6 +194,7 @@ function updateActiveSessionDisplay(): void {
 
   sessionActionStats.innerHTML = `${getMaterial3Svg("bolt", 12)} <span>${current.verifiedCount} verified</span>`;
   liveActionText.textContent = `${current.state}`;
+  updateExecutionControls(current);
 
   renderChatMessages(current);
   renderActivityFeed(current);
@@ -184,7 +206,40 @@ function renderChatMessages(session: SessionData): void {
   if (session.messages.length === 0) {
     const emptyHint = document.createElement("div");
     emptyHint.className = "chat-empty-state";
-    emptyHint.textContent = "Send a message or browser instruction below.";
+
+    const mark = document.createElement("span");
+    mark.className = "empty-state-mark";
+    mark.innerHTML = getMaterial3Svg("explore", 24);
+
+    const heading = document.createElement("h1");
+    heading.textContent = "Ready when the page is.";
+
+    const copy = document.createElement("p");
+    copy.textContent = "Attach the active tab, then describe the outcome you want. Relay will show each browser action as it happens.";
+
+    const suggestions = document.createElement("div");
+    suggestions.className = "empty-suggestions";
+    for (const suggestion of [
+      "Summarize this page",
+      "Find the primary action",
+      "Check this form for issues",
+    ]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "suggestion-chip";
+      button.textContent = suggestion;
+      button.onclick = () => {
+        steerInput.value = suggestion;
+        updateComposerState();
+        steerInput.focus();
+      };
+      suggestions.appendChild(button);
+    }
+
+    emptyHint.appendChild(mark);
+    emptyHint.appendChild(heading);
+    emptyHint.appendChild(copy);
+    emptyHint.appendChild(suggestions);
     chatMessagesContainer.appendChild(emptyHint);
     return;
   }
@@ -369,11 +424,23 @@ function closeSession(runId: string): void {
   if (!session) return;
 
   if (session.isPinned) {
-    alert(`"${session.name}" is pinned. Unpin it first if you wish to close/delete it.`);
+    showNotice(`Unpin ${session.name} before closing it.`);
     return;
   }
 
   deleteSession(runId, true);
+}
+
+function requestSessionDelete(runId: string): void {
+  const session = sessions.get(runId);
+  if (!session) return;
+  if (session.isPinned) {
+    showNotice(`Unpin ${session.name} before deleting it.`);
+    return;
+  }
+  deleteDialog.dataset.runId = runId;
+  deleteDialogTitle.textContent = `Delete ${session.name}?`;
+  deleteDialog.showModal();
 }
 
 function deleteSession(runId: string, fromClose = false): void {
@@ -418,37 +485,49 @@ function togglePin(runId: string): void {
 // Event Listeners
 btnNewSession.addEventListener("click", () => createNewSession());
 btnTogglePin.addEventListener("click", () => togglePin(activeRunId));
-btnDeleteSession.addEventListener("click", () => deleteSession(activeRunId));
+btnDeleteSession.addEventListener("click", () => requestSessionDelete(activeRunId));
 sessionPinStatus.addEventListener("click", () => togglePin(activeRunId));
+deleteDialog.addEventListener("close", () => {
+  if (deleteDialog.returnValue !== "confirm") return;
+  const runId = deleteDialog.dataset.runId;
+  if (runId) deleteSession(runId);
+});
 
 btnAttachTab.addEventListener("click", () => {
   chrome.runtime.sendMessage({ type: "ATTACH_ACTIVE_TAB" }, (response) => {
     const current = sessions.get(activeRunId);
     if (response?.attached && current) {
       current.tabId = response.tabId;
-      tabStatusText.textContent = `Tab ${response.tabId}`;
+      tabStatusText.textContent = `Attached to tab ${response.tabId}`;
+      showNotice(`Attached ${current.name} to tab ${response.tabId}.`);
     } else {
-      tabStatusText.textContent = "Attach Failed";
+      tabStatusText.textContent = "Attachment failed";
+      showNotice("Could not attach the active tab.");
     }
   });
 });
 
 btnPause.addEventListener("click", () => {
   const current = sessions.get(activeRunId);
-  if (current) current.state = "PAUSED";
-  dispatchControl("pause");
+  if (!current) return;
+  const shouldResume = current.state === "PAUSED";
+  current.state = shouldResume ? "RUNNING" : "PAUSED";
+  dispatchControl(shouldResume ? "resume" : "pause");
   liveActionBox.style.display = "block";
-  liveActionText.textContent = "PAUSED · Awaiting resume";
-  liveDot.style.color = "var(--magenta-steer)";
+  liveActionText.textContent = shouldResume ? "RUNNING · Agent resumed" : "PAUSED · Awaiting resume";
+  liveDot.style.color = shouldResume ? "var(--cyan-accent)" : "var(--magenta-steer)";
+  updateExecutionControls(current);
 });
 
 btnStop.addEventListener("click", () => {
   const current = sessions.get(activeRunId);
-  if (current) current.state = "STOPPED";
+  if (!current) return;
+  current.state = "STOPPED";
   dispatchControl("stop");
   liveActionBox.style.display = "block";
   liveActionText.textContent = "STOPPED · Execution halted";
   liveDot.style.color = "var(--red-error)";
+  updateExecutionControls(current);
 });
 
 btnRestart.addEventListener("click", () => {
@@ -457,7 +536,10 @@ btnRestart.addEventListener("click", () => {
   dispatchControl("restart");
   liveActionText.textContent = "READY";
   liveDot.style.color = "var(--cyan-accent)";
-  if (current) renderActivityFeed(current);
+  if (current) {
+    updateExecutionControls(current);
+    renderActivityFeed(current);
+  }
 });
 
 function submitChatMessage(): void {
@@ -468,6 +550,7 @@ function submitChatMessage(): void {
   if (!current) return;
 
   steerInput.value = "";
+  updateComposerState();
 
   const historySnapshot = current.messages
     .filter((m) => !m.pending)
@@ -500,6 +583,7 @@ function submitChatMessage(): void {
 }
 
 btnSteer.addEventListener("click", () => submitChatMessage());
+steerInput.addEventListener("input", () => updateComposerState());
 steerInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
@@ -508,11 +592,48 @@ steerInput.addEventListener("keydown", (e) => {
 });
 
 btnTakeOver.addEventListener("click", () => {
-  dispatchControl("take_over");
+  const current = sessions.get(activeRunId);
+  if (!current) return;
+  const shouldReturn = current.state === "MANUAL_TAKEOVER";
+  current.state = shouldReturn ? "READY" : "MANUAL_TAKEOVER";
+  dispatchControl(shouldReturn ? "return_control" : "take_over");
   liveActionBox.style.display = "block";
-  liveActionText.textContent = "MANUAL TAKEOVER · Agent paused";
-  liveDot.style.color = "var(--magenta-steer)";
+  liveActionText.textContent = shouldReturn ? "READY · Control returned" : "MANUAL TAKEOVER · Agent paused";
+  liveDot.style.color = shouldReturn ? "var(--cyan-accent)" : "var(--magenta-steer)";
+  updateExecutionControls(current);
 });
+
+function updateComposerState(): void {
+  const length = steerInput.value.length;
+  btnSteer.disabled = steerInput.value.trim().length === 0;
+  composerCount.textContent = `${length} / 4000`;
+  steerInput.style.height = "auto";
+  steerInput.style.height = `${Math.min(steerInput.scrollHeight, 110)}px`;
+}
+
+function updateExecutionControls(session: SessionData): void {
+  const isPaused = session.state === "PAUSED";
+  const isManual = session.state === "MANUAL_TAKEOVER";
+  btnPause.innerHTML = isPaused
+    ? `${getMaterial3Svg("restart_alt", 12)} <span>RESUME</span>`
+    : `${getMaterial3Svg("pause", 12)} <span>PAUSE</span>`;
+  btnPause.classList.toggle("is-active", isPaused);
+  btnPause.setAttribute("aria-pressed", String(isPaused));
+  btnTakeOver.innerHTML = isManual
+    ? `${getMaterial3Svg("restart_alt", 12)} <span>RETURN</span>`
+    : `${getMaterial3Svg("touch_app", 12)} <span>TAKE OVER</span>`;
+  btnTakeOver.classList.toggle("is-active", isManual);
+  btnTakeOver.setAttribute("aria-pressed", String(isManual));
+}
+
+let noticeTimer: number | undefined;
+
+function showNotice(message: string): void {
+  panelNotice.textContent = message;
+  panelNotice.classList.add("is-visible");
+  if (noticeTimer !== undefined) window.clearTimeout(noticeTimer);
+  noticeTimer = window.setTimeout(() => panelNotice.classList.remove("is-visible"), 2600);
+}
 
 function dispatchControl(command: string, instruction?: string): void {
   const current = sessions.get(activeRunId);
@@ -570,6 +691,7 @@ chrome.runtime.onMessage.addListener((msg) => {
     if (msg.epoch !== undefined) session.epoch = msg.epoch;
     if (targetRunId === activeRunId) {
       liveActionText.textContent = `${session.state}`;
+      updateExecutionControls(session);
     }
   } else if (msg.event === "action.started" && msg.action) {
     const actionId = msg.idempotency_key || `act_${Date.now()}`;

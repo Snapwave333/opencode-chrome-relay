@@ -1,11 +1,66 @@
-import { NATIVE_HOST_NAME } from "../shared/constants.js";
+import { NATIVE_HOST_NAME, DEFAULT_BROKER_URL } from "../shared/constants.js";
 
 export class NativeBridgePort {
+  private ws: WebSocket | null = null;
   private port: chrome.runtime.Port | null = null;
+  private pendingQueue: string[] = [];
   private messageListeners: ((msg: any) => void)[] = [];
   private disconnectListeners: (() => void)[] = [];
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   public connect(): boolean {
+    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+      return true;
+    }
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    try {
+      const ws = new WebSocket(DEFAULT_BROKER_URL);
+      this.ws = ws;
+      ws.onopen = () => {
+        while (this.pendingQueue.length > 0 && ws.readyState === WebSocket.OPEN) {
+          const item = this.pendingQueue.shift()!;
+          ws.send(item);
+        }
+      };
+      ws.onmessage = (ev) => {
+        try {
+          const parsed = typeof ev.data === "string" ? JSON.parse(ev.data) : ev.data;
+          for (const listener of this.messageListeners) {
+            listener(parsed);
+          }
+        } catch {
+          // Ignore malformed frame
+        }
+      };
+      ws.onclose = () => {
+        if (this.ws === ws) {
+          this.ws = null;
+        }
+        for (const listener of this.disconnectListeners) {
+          listener();
+        }
+        if (!this.reconnectTimer) {
+          this.reconnectTimer = setTimeout(() => {
+            this.reconnectTimer = null;
+            this.connect();
+          }, 1500);
+        }
+      };
+      ws.onerror = () => {
+        // onclose will handle reconnect
+      };
+      return true;
+    } catch {
+      this.ws = null;
+      return this.connectNativeFallback();
+    }
+  }
+
+  private connectNativeFallback(): boolean {
+    if (this.port) return true;
     try {
       this.port = chrome.runtime.connectNative(NATIVE_HOST_NAME);
       this.port.onMessage.addListener((msg) => {
@@ -14,10 +69,8 @@ export class NativeBridgePort {
         }
       });
       this.port.onDisconnect.addListener(() => {
+        const _err = chrome.runtime.lastError;
         this.port = null;
-        for (const listener of this.disconnectListeners) {
-          listener();
-        }
       });
       return true;
     } catch {
@@ -27,10 +80,16 @@ export class NativeBridgePort {
   }
 
   public send(msg: any): boolean {
-    if (!this.port) {
-      return false;
+    const serialized = typeof msg === "string" ? msg : JSON.stringify(msg);
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(serialized);
+      return true;
     }
-    this.port.postMessage(msg);
+    this.pendingQueue.push(serialized);
+    if (this.pendingQueue.length > 100) {
+      this.pendingQueue.shift();
+    }
+    this.connect();
     return true;
   }
 
@@ -43,6 +102,10 @@ export class NativeBridgePort {
   }
 
   public isConnected(): boolean {
-    return this.port !== null;
+    if (this.ws !== null && this.ws.readyState === WebSocket.OPEN) {
+      return true;
+    }
+    this.connect();
+    return this.ws !== null && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING);
   }
 }

@@ -1,4 +1,4 @@
-import { DOCK_CONTAINER_ID, COLORS, M3_COLORS } from "../shared/constants.js";
+import { DOCK_CONTAINER_ID, M3_COLORS } from "../shared/constants.js";
 import { getMaterial3Svg } from "../shared/material_icons.js";
 
 export class InPageDock {
@@ -36,6 +36,7 @@ export class InPageDock {
         background: ${M3_COLORS.surfaceContainerHigh};
         color: ${M3_COLORS.onSurface};
         border: 1px solid rgba(137, 147, 150, 0.25);
+        min-height: 34px;
         padding: 6px 12px;
         font-size: 11px;
         font-weight: 700;
@@ -50,6 +51,15 @@ export class InPageDock {
       .dock-btn:hover {
         transform: translateY(-1px) scale(1.02);
         box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+      }
+      .dock-btn:active,
+      .dismiss-btn:active {
+        transform: scale(0.96);
+      }
+      .dock-btn:focus-visible,
+      .dismiss-btn:focus-visible {
+        outline: 2px solid ${M3_COLORS.primary};
+        outline-offset: 2px;
       }
       .btn-pause {
         border-color: rgba(255, 183, 77, 0.4);
@@ -82,6 +92,8 @@ export class InPageDock {
         border: none;
         color: ${M3_COLORS.onSurfaceVariant};
         cursor: pointer;
+        width: 30px;
+        height: 30px;
         padding: 4px;
         border-radius: 9999px;
         display: inline-flex;
@@ -93,29 +105,51 @@ export class InPageDock {
         background: rgba(137, 147, 150, 0.2);
         color: ${M3_COLORS.onSurface};
       }
+      @media (max-width: 520px) {
+        .dock-bar {
+          gap: 5px;
+          padding: 5px 8px;
+        }
+        .dock-btn {
+          padding-inline: 9px;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .dock-btn,
+        .dismiss-btn {
+          transition-duration: 0.01ms;
+        }
+      }
     `;
 
     const dock = document.createElement("div");
     dock.className = "dock-bar";
+    dock.role = "toolbar";
+    dock.setAttribute("aria-label", "Relay execution controls");
 
     const btnPause = document.createElement("button");
     btnPause.className = "dock-btn btn-pause";
     btnPause.innerHTML = `${getMaterial3Svg("pause", 12)} <span>PAUSE</span>`;
+    btnPause.title = "Pause agent execution";
     btnPause.onclick = () => onControl("pause");
 
     const btnStop = document.createElement("button");
     btnStop.className = "dock-btn btn-stop";
     btnStop.innerHTML = `${getMaterial3Svg("stop", 12)} <span>STOP</span>`;
+    btnStop.title = "Stop agent execution";
     btnStop.onclick = () => onControl("stop");
 
     const btnSteer = document.createElement("button");
     btnSteer.className = "dock-btn btn-steer";
     btnSteer.innerHTML = `${getMaterial3Svg("send", 12)} <span>STEER</span>`;
+    btnSteer.title = "Send a new instruction";
     btnSteer.onclick = () => onControl("steer");
 
     const btnDismiss = document.createElement("button");
     btnDismiss.className = "dismiss-btn";
     btnDismiss.innerHTML = getMaterial3Svg("close", 14);
+    btnDismiss.title = "Dismiss controls";
+    btnDismiss.setAttribute("aria-label", "Dismiss relay controls");
     btnDismiss.onclick = () => this.hide();
 
     dock.appendChild(btnPause);

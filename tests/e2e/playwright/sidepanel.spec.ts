@@ -177,4 +177,37 @@ test.describe("Sidepanel Cockpit E2E Tests", () => {
     await page.click("#btn-new-session");
     await expect(page.locator(".timeline-entry")).toHaveCount(0);
   });
+
+  test("supports resume, manual control return, guarded deletion, and composer feedback", async ({ page }) => {
+    const composer = page.locator("#steer-input");
+    const send = page.locator("#btn-steer-send");
+
+    await expect(send).toBeDisabled();
+    await composer.fill("Inspect the current page");
+    await expect(send).toBeEnabled();
+    await expect(page.locator("#composer-count")).toHaveText("24 / 4000");
+
+    await page.click("#btn-pause");
+    await expect(page.locator("#btn-pause")).toContainText("RESUME");
+    await expect(page.locator("#live-action-text")).toContainText("PAUSED");
+    expect(await page.evaluate(() => (window as any).__lastMessage.command)).toBe("pause");
+
+    await page.click("#btn-pause");
+    await expect(page.locator("#btn-pause")).toContainText("PAUSE");
+    expect(await page.evaluate(() => (window as any).__lastMessage.command)).toBe("resume");
+
+    await page.click("#btn-take-over");
+    await expect(page.locator("#btn-take-over")).toContainText("RETURN");
+    expect(await page.evaluate(() => (window as any).__lastMessage.command)).toBe("take_over");
+
+    await page.click("#btn-take-over");
+    await expect(page.locator("#btn-take-over")).toContainText("TAKE OVER");
+    expect(await page.evaluate(() => (window as any).__lastMessage.command)).toBe("return_control");
+
+    await page.click("#btn-new-session");
+    await page.click("#btn-delete-session");
+    await expect(page.locator("#delete-dialog")).toBeVisible();
+    await page.getByRole("button", { name: "Delete session", exact: true }).click();
+    await expect(page.locator(".session-tab")).toHaveCount(1);
+  });
 });

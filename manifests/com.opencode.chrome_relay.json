@@ -3,8 +3,7 @@
   "description": "OpenCode Chrome Relay Native Messaging Host",
   "name": "com.opencode.chrome_relay",
   "allowed_origins": [
-    "chrome-extension://pogdiiiklddnjkdmnhkdbcelighmkjgb/",
-    "chrome-extension://*/"
+    "chrome-extension://pogdiiiklddnjkdmnhkdbcelighmkjgb/"
   ],
   "type": "stdio"
 }
