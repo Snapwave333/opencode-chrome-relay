@@ -12,6 +12,7 @@
   },
   "devDependencies": {
     "chrome-types": "^0.1.28",
-    "@types/chrome": "^0.0.268"
+    "@types/chrome": "^0.0.268",
+    "esbuild": "^0.28.2"
   }
 }

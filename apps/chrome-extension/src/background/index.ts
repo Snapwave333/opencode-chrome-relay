@@ -47,6 +47,21 @@ nativePort.onMessage(async (msg: ProtocolEnvelope) => {
 
   if (msg.event === "action.started" && msg.action) {
     await handleActionRequest(msg);
+  } else if (
+    msg.event === "run.state_changed" &&
+    (msg.payload as any)?.command === "steer" &&
+    typeof (msg.payload as any)?.instruction === "string"
+  ) {
+    const runId = msg.run_id || "run_1";
+    if (!activeRuns.has(runId)) {
+      void handleUserChat(
+        runId,
+        msg.epoch || 0,
+        (msg.payload as any).instruction,
+        [],
+        msg.tab_id
+      );
+    }
   }
 });
 
@@ -174,8 +189,70 @@ async function handleActionRequest(
   const action = envelope.action;
   if (!action) return { success: false, summary: "Missing action" };
 
+  if (action.type === "browser_list_tabs") {
+    const allTabs = await chrome.tabs.query({});
+    const tabs = allTabs.map((t) => ({
+      id: t.id,
+      windowId: t.windowId,
+      active: t.active,
+      title: t.title || "",
+      url: t.url || "",
+    }));
+    const summary = `Listed ${tabs.length} open browser tabs`;
+    sendActionFinished(envelope, {
+      success: true,
+      verified: true,
+      tabs,
+      outcome_summary: summary,
+    });
+    return { success: true, summary };
+  }
+
+  if (action.type === "browser_new_tab") {
+    try {
+      const targetUrl = action.url ? normalizeUrl(action.url) : "https://www.google.com";
+      const created = await chrome.tabs.create({ url: targetUrl, active: true });
+      if (created.id) await waitForTabComplete(created.id);
+      const summary = `Opened new tab (${created.id}) at ${targetUrl}`;
+      sendActionFinished(envelope, {
+        success: true,
+        verified: true,
+        tab_id: created.id,
+        url: targetUrl,
+        outcome_summary: summary,
+      });
+      return { success: true, summary, tabId: created.id };
+    } catch (err: any) {
+      const msg = err?.message || "Failed to create new tab";
+      sendActionFailed(envelope, msg);
+      return { success: false, summary: msg };
+    }
+  }
+
   const resolvedTab = await resolveActiveTab(envelope.tab_id);
   let tabId = resolvedTab?.id;
+
+  if (action.type === "browser_close_tab") {
+    if (!tabId) {
+      sendActionFailed(envelope, "No tab ID found to close");
+      return { success: false, summary: "No tab ID found to close" };
+    }
+    try {
+      await chrome.tabs.remove(tabId);
+      const summary = `Closed tab ${tabId}`;
+      sendActionFinished(envelope, {
+        success: true,
+        verified: true,
+        closed_tab_id: tabId,
+        outcome_summary: summary,
+      });
+      return { success: true, summary };
+    } catch (err: any) {
+      const msg = err?.message || "Failed to close tab";
+      sendActionFailed(envelope, msg);
+      return { success: false, summary: msg };
+    }
+  }
 
   // Handle browser_navigate directly via chrome.tabs.update (or create) so it works from any tab including chrome://newtab/
   if (action.type === "browser_navigate") {
@@ -197,6 +274,7 @@ async function handleActionRequest(
       sendActionFinished(envelope, {
         success: true,
         verified: true,
+        tab_id: tabId,
         url: targetUrl,
         outcome_summary: summary,
       });
@@ -462,6 +540,150 @@ async function handleActionRequest(
         if (!hasCdp) hasCdp = await tabManager.attachTab(tabId);
         const uploadSuccess = hasCdp ? await cdp.setFileInputFiles(tabId, uploadSelector, files) : false;
         outcome = { success: uploadSuccess, verified: uploadSuccess, uploaded_files: files };
+        break;
+      }
+
+      case "browser_extract": {
+        const [extRes] = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: (sel: string | undefined) => {
+            const root = (sel ? document.querySelector(sel) : document.body) as HTMLElement | null;
+            if (!root) {
+              return { ok: false, error: `Selector not found: ${sel}` };
+            }
+            const text = (root.innerText || root.textContent || "").trim();
+            const links = Array.from(root.querySelectorAll("a[href]"))
+              .slice(0, 100)
+              .map((a) => ({
+                text: ((a as HTMLElement).innerText || a.textContent || "").replace(/\s+/g, " ").trim(),
+                href: (a as HTMLAnchorElement).href,
+              }))
+              .filter((l) => l.href && !l.href.startsWith("javascript:"));
+            return {
+              ok: true,
+              url: window.location.href,
+              title: document.title,
+              text: text.slice(0, 50000),
+              links,
+            };
+          },
+          args: [action.locator?.selector],
+        });
+        const extracted = extRes?.result as any;
+        if (!extracted?.ok) {
+          const errMsg = extracted?.error || "Extraction failed";
+          sendActionFailed(envelope, errMsg);
+          return { success: false, summary: errMsg, tabId };
+        }
+        outcome = {
+          success: true,
+          verified: true,
+          extracted,
+          outcome_summary: `Extracted ${extracted.text?.length || 0} chars and ${extracted.links?.length || 0} links`,
+        };
+        break;
+      }
+
+      case "browser_eval": {
+        const code = action.text || action.value || action.predicate || "";
+        const [evalRes] = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: (expr: string) => {
+            try {
+              const fn = new Function(`return (${expr})`);
+              const val = fn();
+              return { ok: true, result: val };
+            } catch {
+              try {
+                const fnBlock = new Function(expr);
+                const val = fnBlock();
+                return { ok: true, result: val };
+              } catch (err: any) {
+                return { ok: false, error: err?.message || String(err) };
+              }
+            }
+          },
+          args: [code],
+        });
+        const resObj = evalRes?.result as any;
+        if (!resObj?.ok) {
+          const errMsg = resObj?.error || "Eval failed";
+          sendActionFailed(envelope, errMsg);
+          return { success: false, summary: errMsg, tabId };
+        }
+        outcome = {
+          success: true,
+          verified: true,
+          eval_result: resObj.result,
+          outcome_summary: `Evaluated JS expression`,
+        };
+        break;
+      }
+
+      case "browser_select": {
+        const [selRes] = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: (loc: any, val: string) => {
+            const sel = loc?.selector
+              ? (document.querySelector(loc.selector) as HTMLSelectElement | null)
+              : (document.querySelector("select") as HTMLSelectElement | null);
+            if (!sel) return { ok: false, error: "Select element not found" };
+            const option = Array.from(sel.options).find(
+              (o) => o.value === val || (o.textContent || "").trim().toLowerCase() === val.toLowerCase()
+            );
+            if (option) {
+              sel.value = option.value;
+            } else {
+              sel.value = val;
+            }
+            sel.dispatchEvent(new Event("input", { bubbles: true }));
+            sel.dispatchEvent(new Event("change", { bubbles: true }));
+            return { ok: true, summary: `Selected "${val}"` };
+          },
+          args: [action.locator || {}, action.value || action.text || ""],
+        });
+        const selOut = selRes?.result as any;
+        if (!selOut?.ok) {
+          const errMsg = selOut?.error || "Select failed";
+          sendActionFailed(envelope, errMsg);
+          return { success: false, summary: errMsg, tabId };
+        }
+        outcome = { success: true, verified: true, outcome_summary: selOut.summary };
+        break;
+      }
+
+      case "browser_wait": {
+        const timeoutMs = action.timeout_ms || 5000;
+        const selector = action.locator?.selector;
+        const text = action.text || action.locator?.text;
+        if (!selector && !text) {
+          await new Promise((r) => setTimeout(r, timeoutMs));
+          outcome = { success: true, verified: true, outcome_summary: `Waited ${timeoutMs}ms` };
+          break;
+        }
+        const start = Date.now();
+        let found = false;
+        while (Date.now() - start < timeoutMs) {
+          const [waitRes] = await chrome.scripting.executeScript({
+            target: { tabId },
+            func: (s: string | undefined, t: string | undefined) => {
+              if (s && document.querySelector(s)) return true;
+              if (t && document.body?.innerText?.toLowerCase().includes(t.toLowerCase())) return true;
+              return false;
+            },
+            args: [selector, text],
+          });
+          if (waitRes?.result) {
+            found = true;
+            break;
+          }
+          await new Promise((r) => setTimeout(r, 250));
+        }
+        outcome = {
+          success: found,
+          verified: found,
+          outcome_summary: found ? `Condition met within ${Date.now() - start}ms` : `Wait timed out after ${timeoutMs}ms`,
+        };
         break;
       }
 
@@ -1144,6 +1366,15 @@ async function handleUserChat(
     if (current?.token === runToken) {
       activeRuns.delete(runId);
     }
+    nativePort.send({
+      v: 1,
+      event: "run.completed",
+      event_id: `evt_done_${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      run_id: runId,
+      epoch,
+      payload: { from_extension: true },
+    });
   }
 }
 

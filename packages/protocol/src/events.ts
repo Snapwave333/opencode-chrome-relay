@@ -30,6 +30,8 @@ export const EventTypeSchema = z.enum([
   "chat.response",
   "checkpoint.saved",
   "run.completed",
+  "browser.action.request",
+  "extension.reload",
 ]);
 export type EventType = z.infer<typeof EventTypeSchema>;
 

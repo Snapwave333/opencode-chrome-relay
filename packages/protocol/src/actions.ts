@@ -18,6 +18,8 @@ export type ElementLocator = z.infer<typeof ElementLocatorSchema>;
 
 export const BrowserActionTypeSchema = z.enum([
   "browser_list_tabs",
+  "browser_new_tab",
+  "browser_close_tab",
   "browser_attach",
   "browser_snapshot",
   "browser_screenshot",
@@ -29,6 +31,7 @@ export const BrowserActionTypeSchema = z.enum([
   "browser_select",
   "browser_wait",
   "browser_extract",
+  "browser_eval",
   "browser_download",
   "browser_upload",
   "browser_verify",
@@ -43,7 +46,7 @@ export const ActionPayloadSchema = z.object({
   text: z.string().optional(),
   key: z.string().optional(),
   value: z.string().optional(),
-  url: z.string().url().optional(),
+  url: z.string().optional(),
   download_path: z.string().optional(),
   file_paths: z.array(z.string()).optional(),
   expected_origin: z.string().optional(),

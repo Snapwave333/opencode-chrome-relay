@@ -106,11 +106,13 @@ async fn handle_connection(
                                             "v": 1,
                                             "event": "run.state_changed",
                                             "event_id": uuid::Uuid::new_v4().to_string(),
+                                            "timestamp": chrono::Utc::now().to_rfc3339(),
                                             "run_id": ctrl.run_id,
                                             "epoch": ctrl.epoch,
                                             "payload": {
                                                 "new_state": new_state,
-                                                "command": ctrl.command
+                                                "command": ctrl.command,
+                                                "instruction": ctrl.instruction
                                             }
                                         });
                                         let resp_str = resp.to_string();
@@ -133,9 +135,11 @@ async fn handle_connection(
                                                 "v": 1,
                                                 "event": if policy.requires_approval { "approval.requested" } else { "action.started" },
                                                 "event_id": uuid::Uuid::new_v4().to_string(),
+                                                "timestamp": chrono::Utc::now().to_rfc3339(),
                                                 "run_id": envelope.run_id,
                                                 "epoch": envelope.epoch,
                                                 "sequence": envelope.sequence,
+                                                "tab_id": envelope.tab_id,
                                                 "idempotency_key": envelope.idempotency_key,
                                                 "action": envelope.action,
                                                 "payload": {
@@ -153,6 +157,7 @@ async fn handle_connection(
                                                 "v": 1,
                                                 "event": "action.failed",
                                                 "event_id": uuid::Uuid::new_v4().to_string(),
+                                                "timestamp": chrono::Utc::now().to_rfc3339(),
                                                 "run_id": envelope.run_id,
                                                 "idempotency_key": envelope.idempotency_key,
                                                 "payload": { "error": err }

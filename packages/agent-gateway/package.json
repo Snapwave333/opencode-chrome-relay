@@ -1,0 +1,20 @@
+{
+  "name": "@opencode/relay-agent-gateway",
+  "version": "1.0.0",
+  "description": "Provider-neutral MCP and JSONL gateway for OpenCode Chrome Relay",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "relay-agent-gateway": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "@opencode/chrome-relay-protocol": "*",
+    "opencode-chrome-relay": "*"
+  }
+}

@@ -38,9 +38,10 @@
 
 ## 2. Component Directory
 
-- **`packages/protocol`**: Protocol envelopes, execution states, 16 browser tool schemas, control command schemas, and policy evaluation rules.
+- **`packages/protocol`**: Protocol envelopes, execution states, browser tool schemas, control command schemas, and policy evaluation rules.
 - **`crates/relay-broker`**: Local Rust broker with SQLite durable state (`runs`, `action_journal`, `checkpoints`, `tab_leases`, `approvals`), state machine with cancellation fencing, tab lease manager, and authenticated WebSocket server.
 - **`crates/relay-native-host`**: Chrome Native Messaging stdio host executable communicating with the browser via 32-bit length-prefixed framing and relaying to the broker over loopback.
-- **`packages/opencode-plugin`**: OpenCode adapter exporting the 16 `browser_*` tools, binding session/model context, and dispatching tool requests to the broker.
+- **`packages/opencode-plugin`**: OpenCode adapter exporting the 17 `browser_*` tools, binding session/model context, and dispatching tool requests to the broker.
+- **`packages/agent-gateway`**: Provider-neutral MCP and JSONL adapter with capability discovery, execution controls, correlation-safe results, and bounded multi-step pipelines.
 - **`apps/chrome-extension`**: Manifest V3 extension featuring Side Panel cockpit, isolated Shadow DOM in-page overlay and control dock, CDP debugger controller, and semantic DOM locators.
 - **`installer/windows`**: Manifest template and PowerShell install/uninstall scripts registering `HKCU\Software\Google\Chrome\NativeMessagingHosts\com.opencode.chrome_relay`.

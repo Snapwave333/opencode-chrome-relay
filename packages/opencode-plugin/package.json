@@ -5,6 +5,10 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "type": "module",
+  "bin": {
+    "browser-relay": "./dist/cli.js",
+    "oc-relay": "./dist/cli.js"
+  },
   "scripts": {
     "build": "tsc",
     "test": "vitest run"

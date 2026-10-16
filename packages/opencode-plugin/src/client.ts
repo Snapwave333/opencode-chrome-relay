@@ -3,7 +3,6 @@ import {
   ProtocolEnvelope,
   ActionPayload,
   ControlCommand,
-  ExecutionState,
 } from "@opencode/chrome-relay-protocol";
 
 export interface RelayClientOptions {
@@ -33,28 +32,47 @@ export class RelayBrokerClient {
     return new Promise((resolve, reject) => {
       try {
         this.ws = new WebSocket(this.brokerUrl);
+        let settled = false;
+        const finish = (error?: Error) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          if (error) reject(error);
+          else resolve();
+        };
+        const timeout = setTimeout(
+          () => finish(new Error("Timed out connecting to the relay broker")),
+          5000
+        );
 
         this.ws.on("open", () => {
           if (this.authToken) {
             this.ws?.send(JSON.stringify({ auth_token: this.authToken }));
+          } else {
+            finish();
           }
-          resolve();
         });
 
         this.ws.on("message", (data: WebSocket.RawData) => {
           try {
             const raw = JSON.parse(data.toString());
             this.handleIncoming(raw);
-          } catch (e) {
+            if (this.authToken && raw.event === "bridge.connected") finish();
+            if (raw.error === "Unauthorized") finish(new Error("Relay broker authentication failed"));
+          } catch {
             // Ignore non-json
           }
         });
 
         this.ws.on("error", (err) => {
-          reject(err);
+          finish(err);
+        });
+
+        this.ws.on("close", () => {
+          if (!settled) finish(new Error("Relay broker closed before authentication completed"));
         });
       } catch (err) {
-        reject(err);
+        reject(err instanceof Error ? err : new Error(String(err)));
       }
     });
   }
@@ -93,7 +111,7 @@ export class RelayBrokerClient {
 
     const envelope: ProtocolEnvelope = {
       v: 1,
-      event: "action.started",
+      event: "browser.action.request",
       event_id: `evt_${Date.now()}_${this.sequence}`,
       run_id: this.runId,
       epoch: this.epoch,
@@ -112,13 +130,13 @@ export class RelayBrokerClient {
 
       const timeout = setTimeout(() => {
         reject(new Error(`Action timeout waiting for broker response (${action.type})`));
-      }, action.timeout_ms || 10000);
+      }, Math.max(action.timeout_ms || 30000, 10000));
 
       const responseHandler = (data: WebSocket.RawData) => {
         try {
           const parsed = JSON.parse(data.toString());
-          if (parsed.idempotency_key === idempotencyKey || parsed.run_id === this.runId) {
-            if (parsed.event === "action.started" || parsed.event === "action.finished") {
+          if (parsed.idempotency_key === idempotencyKey) {
+            if (parsed.event === "action.finished") {
               clearTimeout(timeout);
               this.ws?.off("message", responseHandler);
               resolve(parsed.payload || parsed);
