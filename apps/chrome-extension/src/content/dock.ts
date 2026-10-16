@@ -1,4 +1,5 @@
 import { DOCK_CONTAINER_ID, COLORS } from "../shared/constants.js";
+import { getMaterial3Svg } from "../shared/material_icons.js";
 
 export class InPageDock {
   private container: HTMLDivElement | null = null;
@@ -39,6 +40,9 @@ export class InPageDock {
         border-radius: 4px;
         cursor: pointer;
         transition: all 0.1s ease;
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
       }
       .dock-btn:hover {
         background: ${COLORS.borderDark};
@@ -52,8 +56,13 @@ export class InPageDock {
         border: none;
         color: ${COLORS.textMuted};
         cursor: pointer;
-        font-size: 14px;
-        padding: 0 4px;
+        padding: 2px 4px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .dismiss-btn:hover {
+        color: #fff;
       }
     `;
 
@@ -62,22 +71,22 @@ export class InPageDock {
 
     const btnPause = document.createElement("button");
     btnPause.className = "dock-btn btn-pause";
-    btnPause.textContent = "PAUSE";
+    btnPause.innerHTML = `${getMaterial3Svg("pause", 12)} <span>PAUSE</span>`;
     btnPause.onclick = () => onControl("pause");
 
     const btnStop = document.createElement("button");
     btnStop.className = "dock-btn btn-stop";
-    btnStop.textContent = "STOP";
+    btnStop.innerHTML = `${getMaterial3Svg("stop", 12)} <span>STOP</span>`;
     btnStop.onclick = () => onControl("stop");
 
     const btnSteer = document.createElement("button");
     btnSteer.className = "dock-btn btn-steer";
-    btnSteer.textContent = "STEER";
+    btnSteer.innerHTML = `${getMaterial3Svg("send", 12)} <span>STEER</span>`;
     btnSteer.onclick = () => onControl("steer");
 
     const btnDismiss = document.createElement("button");
     btnDismiss.className = "dismiss-btn";
-    btnDismiss.textContent = "×";
+    btnDismiss.innerHTML = getMaterial3Svg("close", 14);
     btnDismiss.onclick = () => this.hide();
 
     dock.appendChild(btnPause);

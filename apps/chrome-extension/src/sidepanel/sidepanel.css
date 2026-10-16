@@ -190,6 +190,12 @@ body {
   color: var(--text-main);
 }
 
+.m3-icon {
+  vertical-align: middle;
+  flex-shrink: 0;
+  display: inline-block;
+}
+
 .pin-status-tag {
   font-size: 10px;
   padding: 2px 6px;
@@ -198,6 +204,9 @@ body {
   border: 1px solid var(--border);
   color: var(--cyan-accent);
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .action-stats-badge {
@@ -209,6 +218,9 @@ body {
   color: var(--cyan-accent);
   font-weight: 600;
   letter-spacing: 0.2px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .session-actions {
@@ -373,6 +385,9 @@ body {
   letter-spacing: 0.3px;
   text-transform: uppercase;
   white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .badge-navigate { background: rgba(0, 212, 255, 0.15); color: #00d4ff; border: 1px solid rgba(0, 212, 255, 0.3); }
@@ -410,6 +425,9 @@ body {
   padding: 1px 5px;
   border-radius: 3px;
   white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
 }
 
 .pill-active { color: var(--cyan-accent); background: rgba(0, 212, 255, 0.1); }
@@ -452,6 +470,10 @@ body {
   border-radius: 4px;
   cursor: pointer;
   transition: all 0.1s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
 }
 
 .btn-ctrl:hover {
@@ -501,6 +523,10 @@ body {
   padding: 0 12px;
   border-radius: 4px;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
 }
 
 .btn-steer:hover {

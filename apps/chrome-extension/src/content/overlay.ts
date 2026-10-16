@@ -1,6 +1,7 @@
 import { OVERLAY_CONTAINER_ID, COLORS } from "../shared/constants.js";
 import { ActionPayload } from "@opencode/chrome-relay-protocol";
 import { resolveElementLocator } from "../browser/locators.js";
+import { getMaterial3Svg, Material3IconName } from "../shared/material_icons.js";
 
 export class ActionOverlay {
   private container: HTMLDivElement | null = null;
@@ -222,22 +223,22 @@ export class ActionOverlay {
     this.captionElement?.classList.remove("verified", "failed");
     if (this.scanLineElement) this.scanLineElement.style.display = "none";
 
-    let icon = "🔍";
+    let iconName: Material3IconName = "search";
     let captionText = "Inspecting";
 
     switch (action.type) {
       case "browser_click":
-        icon = "👆";
+        iconName = "touch_app";
         captionText = "Clicking";
         break;
       case "browser_type":
-        icon = "⌨️";
+        iconName = "keyboard";
         const masked = action.text && action.text.length > 0 ? "••••••" : "";
         captionText = `Typing "${masked}"`;
         this.boxElement?.classList.add("type-mode");
         break;
       case "browser_keypress":
-        icon = "⌨️";
+        iconName = "keyboard_alt";
         captionText = `Pressing [${action.key || "Key"}]`;
         break;
       case "browser_scroll":
@@ -247,22 +248,22 @@ export class ActionOverlay {
         this.showNavigationProgress(action.url || "");
         return;
       case "browser_download":
-        this.showToast("📥", `Downloading: ${action.download_path || action.url || "file"}...`);
+        this.showToast("download", `Downloading: ${action.download_path || action.url || "file"}...`);
         return;
       case "browser_upload":
         const fileCount = action.file_paths?.length || 1;
-        this.showToast("📤", `Uploading ${fileCount} file(s)...`);
+        this.showToast("upload", `Uploading ${fileCount} file(s)...`);
         break;
       case "browser_wait":
-        this.showToast("⏳", `Waiting: ${action.predicate || "for condition"} (${action.timeout_ms || 5000}ms)`);
+        this.showToast("hourglass_top", `Waiting: ${action.predicate || "for condition"} (${action.timeout_ms || 5000}ms)`);
         return;
       case "browser_screenshot":
-        icon = "🎯";
+        iconName = "photo_camera";
         captionText = "Vision Grounding (NVIDIA NIM)";
         if (this.scanLineElement) this.scanLineElement.style.display = "block";
         break;
       default:
-        icon = "🔍";
+        iconName = "search";
         captionText = "Inspecting";
     }
 
@@ -285,7 +286,8 @@ export class ActionOverlay {
       this.captionElement.style.display = "flex";
       this.captionElement.style.left = `${Math.max(4, targetBox.x)}px`;
       this.captionElement.style.top = `${Math.max(20, targetBox.y)}px`;
-      this.captionElement.textContent = `${icon} ${captionText}: ${action.locator?.name || action.locator?.role || ""}`;
+      const targetLabel = action.locator?.name || action.locator?.role || "";
+      this.captionElement.innerHTML = `${getMaterial3Svg(iconName, 14)} <span>${captionText}${targetLabel ? ": " + targetLabel : ""}</span>`;
 
       if (action.type === "browser_click" && this.rippleElement) {
         this.rippleElement.style.left = `${targetBox.centerX}px`;
@@ -305,11 +307,11 @@ export class ActionOverlay {
     if (success) {
       this.boxElement.classList.add("verified");
       this.captionElement.classList.add("verified");
-      this.captionElement.textContent = `✓ Verified ${message || ""}`;
+      this.captionElement.innerHTML = `${getMaterial3Svg("check_circle", 14)} <span>Verified ${message || ""}</span>`;
     } else {
       this.boxElement.classList.add("failed");
       this.captionElement.classList.add("failed");
-      this.captionElement.textContent = `✗ Failed: ${message || "Action not confirmed"}`;
+      this.captionElement.innerHTML = `${getMaterial3Svg("cancel", 14)} <span>Failed: ${message || "Action not confirmed"}</span>`;
     }
 
     if (this.clearTimer) clearTimeout(this.clearTimer);
@@ -321,7 +323,7 @@ export class ActionOverlay {
     this.topProgressBar.style.display = "block";
     this.topProgressBar.style.width = "35%";
 
-    this.showToast("🧭", `Navigating to: ${url}`);
+    this.showToast("language", `Navigating to: ${url}`);
 
     setTimeout(() => {
       if (this.topProgressBar) this.topProgressBar.style.width = "85%";
@@ -339,8 +341,16 @@ export class ActionOverlay {
 
   private showScrollMarker(direction: string, amount: number): void {
     if (!this.edgeScrollMarker) return;
-    const arrow = direction === "down" ? "↓" : direction === "up" ? "↑" : direction === "right" ? "→" : "←";
-    this.edgeScrollMarker.textContent = `${arrow} Scrolling ${direction.toUpperCase()} (${amount}px)`;
+    const arrowIcon: Material3IconName =
+      direction === "down"
+        ? "arrow_downward"
+        : direction === "up"
+        ? "arrow_upward"
+        : direction === "right"
+        ? "arrow_forward"
+        : "arrow_back";
+
+    this.edgeScrollMarker.innerHTML = `${getMaterial3Svg(arrowIcon, 15)} <span>Scrolling ${direction.toUpperCase()} (${amount}px)</span>`;
     this.edgeScrollMarker.style.display = "flex";
 
     if (direction === "down") {
@@ -365,9 +375,9 @@ export class ActionOverlay {
     }, 1200);
   }
 
-  public showToast(icon: string, text: string, durationMs = 2000): void {
+  public showToast(iconName: Material3IconName, text: string, durationMs = 2000): void {
     if (!this.floatingToast) return;
-    this.floatingToast.innerHTML = `<span>${icon}</span> <span>${text}</span>`;
+    this.floatingToast.innerHTML = `${getMaterial3Svg(iconName, 16)} <span>${text}</span>`;
     this.floatingToast.style.display = "flex";
 
     if (this.clearTimer) clearTimeout(this.clearTimer);

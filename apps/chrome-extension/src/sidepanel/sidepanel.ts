@@ -1,4 +1,5 @@
 // Side panel UI Logic with Multi-Session Tabbed Interface & Pinning
+import { getMaterial3Svg, Material3IconName } from "../shared/material_icons.js";
 
 interface ActionItem {
   id: string;
@@ -80,6 +81,13 @@ sessions.set("run_1", {
 renderTabs();
 updateActiveSessionDisplay();
 
+// Initialize button icons with Material 3
+btnNewSession.innerHTML = `${getMaterial3Svg("add", 12)} <span>New</span>`;
+btnPause.innerHTML = `${getMaterial3Svg("pause", 12)} <span>PAUSE</span>`;
+btnStop.innerHTML = `${getMaterial3Svg("stop", 12)} <span>STOP</span>`;
+btnRestart.innerHTML = `${getMaterial3Svg("restart_alt", 12)} <span>RESTART</span>`;
+btnSteer.innerHTML = `${getMaterial3Svg("send", 12)} <span>SEND</span>`;
+
 // Query bridge status from background
 chrome.runtime.sendMessage({ type: "GET_BRIDGE_STATUS" }, (response) => {
   if (response?.connected) {
@@ -105,7 +113,7 @@ function renderTabs(): void {
 
     const pinIndicator = document.createElement("span");
     pinIndicator.className = "tab-pin-indicator";
-    pinIndicator.textContent = session.isPinned ? "📌" : "📍";
+    pinIndicator.innerHTML = session.isPinned ? getMaterial3Svg("push_pin", 12) : getMaterial3Svg("push_pin_outline", 12);
     pinIndicator.title = session.isPinned ? "Pinned: preserved on close" : "Unpinned: deletes on close";
     pinIndicator.onclick = (e) => {
       e.stopPropagation();
@@ -114,7 +122,7 @@ function renderTabs(): void {
 
     const closeBtn = document.createElement("button");
     closeBtn.className = "tab-close-btn";
-    closeBtn.textContent = "×";
+    closeBtn.innerHTML = getMaterial3Svg("close", 12);
     closeBtn.title = session.isPinned ? "Pinned session (click unpin first to close/delete)" : "Close session (deletes session)";
     closeBtn.onclick = (e) => {
       e.stopPropagation();
@@ -143,16 +151,16 @@ function updateActiveSessionDisplay(): void {
   tabStatusText.textContent = current.tabId ? `Attached (Tab ${current.tabId})` : "Active (Attached)";
 
   if (current.isPinned) {
-    sessionPinStatus.textContent = "📌 Pinned (kept on close)";
+    sessionPinStatus.innerHTML = `${getMaterial3Svg("push_pin", 12)} <span>Pinned (kept on close)</span>`;
     sessionPinStatus.style.borderColor = "var(--cyan-accent)";
     btnTogglePin.textContent = "Unpin";
   } else {
-    sessionPinStatus.textContent = "📍 Unpinned (deletes on close)";
+    sessionPinStatus.innerHTML = `${getMaterial3Svg("push_pin_outline", 12)} <span>Unpinned (deletes on close)</span>`;
     sessionPinStatus.style.borderColor = "var(--border)";
     btnTogglePin.textContent = "Pin";
   }
 
-  sessionActionStats.textContent = `⚡ ${current.verifiedCount} verified`;
+  sessionActionStats.innerHTML = `${getMaterial3Svg("bolt", 12)} <span>${current.verifiedCount} verified</span>`;
   liveActionText.textContent = `State: ${current.state} · NVIDIA NIM`;
 
   renderActivityFeed(current);
@@ -178,7 +186,7 @@ function createActionCardElement(action: ActionItem): HTMLElement {
   const badge = document.createElement("span");
   const badgeInfo = getBadgeInfo(action.type);
   badge.className = `action-type-badge ${badgeInfo.className}`;
-  badge.textContent = badgeInfo.label;
+  badge.innerHTML = `${getMaterial3Svg(badgeInfo.icon, 12)} <span>${badgeInfo.label}</span>`;
 
   const targetDesc = document.createElement("span");
   targetDesc.className = "action-target-desc";
@@ -198,13 +206,13 @@ function createActionCardElement(action: ActionItem): HTMLElement {
   const statusPill = document.createElement("span");
   if (action.status === "active") {
     statusPill.className = "action-status-pill pill-active";
-    statusPill.textContent = "⚡ Running";
+    statusPill.innerHTML = `${getMaterial3Svg("bolt", 11)} <span>Running</span>`;
   } else if (action.status === "success") {
     statusPill.className = "action-status-pill pill-verified";
-    statusPill.textContent = "✓ Verified";
+    statusPill.innerHTML = `${getMaterial3Svg("check_circle", 11)} <span>Verified</span>`;
   } else {
     statusPill.className = "action-status-pill pill-failed";
-    statusPill.textContent = "✗ Failed";
+    statusPill.innerHTML = `${getMaterial3Svg("cancel", 11)} <span>Failed</span>`;
   }
 
   header.appendChild(badge);
@@ -223,27 +231,27 @@ function createActionCardElement(action: ActionItem): HTMLElement {
   return card;
 }
 
-function getBadgeInfo(type: string): { label: string; className: string } {
+function getBadgeInfo(type: string): { label: string; icon: Material3IconName; className: string } {
   switch (type) {
     case "browser_navigate":
-      return { label: "🌐 NAVIGATE", className: "badge-navigate" };
+      return { label: "NAVIGATE", icon: "language", className: "badge-navigate" };
     case "browser_click":
-      return { label: "🖱️ CLICK", className: "badge-click" };
+      return { label: "CLICK", icon: "touch_app", className: "badge-click" };
     case "browser_type":
-      return { label: "⌨️ TYPE", className: "badge-type" };
+      return { label: "TYPE", icon: "keyboard", className: "badge-type" };
     case "browser_scroll":
-      return { label: "📜 SCROLL", className: "badge-scroll" };
+      return { label: "SCROLL", icon: "swap_vert", className: "badge-scroll" };
     case "browser_download":
-      return { label: "📥 DOWNLOAD", className: "badge-download" };
+      return { label: "DOWNLOAD", icon: "download", className: "badge-download" };
     case "browser_upload":
-      return { label: "📤 UPLOAD", className: "badge-upload" };
+      return { label: "UPLOAD", icon: "upload", className: "badge-upload" };
     case "browser_verify":
-      return { label: "👁️ VERIFY", className: "badge-verify" };
+      return { label: "VERIFY", icon: "visibility", className: "badge-verify" };
     case "browser_screenshot":
     case "browser_snapshot":
-      return { label: "📷 SNAPSHOT", className: "badge-screenshot" };
+      return { label: "SNAPSHOT", icon: "photo_camera", className: "badge-screenshot" };
     default:
-      return { label: "⚡ SYSTEM", className: "badge-system" };
+      return { label: "SYSTEM", icon: "terminal", className: "badge-system" };
   }
 }
 
@@ -260,7 +268,7 @@ function formatActionTarget(action: any): string {
     case "browser_type":
       const masked = action.text ? "••••••" : "";
       const sel = action.locator?.selector || action.locator?.name || "field";
-      return `${sel} ➔ "${masked}"`;
+      return `${sel} -> "${masked}"`;
     case "browser_scroll":
       return `${action.scroll_direction || "down"} (${action.scroll_amount || 400}px)`;
     case "browser_download":
@@ -520,7 +528,7 @@ chrome.runtime.onMessage.addListener((msg) => {
 
     if (targetRunId === activeRunId) {
       liveDot.style.color = "var(--green-ok)";
-      sessionActionStats.textContent = `⚡ ${session.verifiedCount} verified`;
+      sessionActionStats.innerHTML = `${getMaterial3Svg("bolt", 12)} <span>${session.verifiedCount} verified</span>`;
       liveActionText.textContent = "Verified · NVIDIA NIM ready";
       renderActivityFeed(session);
     }
