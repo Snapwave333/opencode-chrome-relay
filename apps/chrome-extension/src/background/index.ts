@@ -43,7 +43,18 @@ nativePort.onMessage(async (msg: ProtocolEnvelope) => {
 });
 
 const KNOWN_SITES: Array<{ pattern: RegExp; url: string }> = [
-  { pattern: /\b(google\s+cloud(\s+console|\s+consuil|\s+platform)?|gcp(\s+console)?)\b/i, url: "https://console.cloud.google.com" },
+  {
+    pattern: /\b(oauth|credential|client\s+secret|client\s+id|api\s+key).*\b(google\s+cloud|gcp|youtube)\b|\b(google\s+cloud|gcp).*\b(oauth|credential|client\s+secret|client\s+id|api\s+key)\b/i,
+    url: "https://console.cloud.google.com/apis/credentials",
+  },
+  {
+    pattern: /\b(create\s+oauth|new\s+oauth\s+client)\b/i,
+    url: "https://console.cloud.google.com/apis/credentials/oauthclient",
+  },
+  {
+    pattern: /\b(google\s+cloud(\s+console|\s+consuil|\s+platform)?|gcp(\s+console)?)\b/i,
+    url: "https://console.cloud.google.com",
+  },
   { pattern: /\b(gmail|google\s+mail)\b/i, url: "https://mail.google.com" },
   { pattern: /\b(google\s+drive|gdrive)\b/i, url: "https://drive.google.com" },
   { pattern: /\b(google\s+docs)\b/i, url: "https://docs.google.com" },
@@ -73,7 +84,6 @@ const KNOWN_SITES: Array<{ pattern: RegExp; url: string }> = [
 ];
 
 function normalizeUrl(rawUrl: string): string {
-  // Convert spoken/typed "dot com" / "dot org" / "dot io" -> ".com" / ".org" / ".io"
   const cleaned = rawUrl
     .trim()
     .replace(/\s+dot\s+(com|org|net|io|ai|dev|edu|gov|co)\b/gi, ".$1")
@@ -94,7 +104,6 @@ function normalizeUrl(rawUrl: string): string {
     }
   }
 
-  // Single word like "example" or "stripe" -> https://www.<word>.com
   const stripped = cleaned.replace(/^(?:my|the|our)\s+/i, "").trim();
   if (/^[a-z0-9-]+$/i.test(stripped)) {
     return `https://www.${stripped.toLowerCase()}.com`;
@@ -132,7 +141,7 @@ async function resolveActiveTab(preferredTabId?: number | null): Promise<chrome.
   return anyActive.find((t) => t.id && !t.url?.startsWith("devtools://")) || anyActive[0] || null;
 }
 
-async function waitForTabComplete(tabId: number, timeoutMs = 3500): Promise<void> {
+async function waitForTabComplete(tabId: number, timeoutMs = 4500): Promise<void> {
   return new Promise((resolve) => {
     let done = false;
     const finish = () => {
@@ -151,9 +160,11 @@ async function waitForTabComplete(tabId: number, timeoutMs = 3500): Promise<void
   });
 }
 
-async function handleActionRequest(envelope: ProtocolEnvelope): Promise<void> {
+async function handleActionRequest(
+  envelope: ProtocolEnvelope
+): Promise<{ success: boolean; summary: string; tabId?: number }> {
   const action = envelope.action;
-  if (!action) return;
+  if (!action) return { success: false, summary: "Missing action" };
 
   const resolvedTab = await resolveActiveTab(envelope.tab_id);
   let tabId = resolvedTab?.id;
@@ -162,7 +173,7 @@ async function handleActionRequest(envelope: ProtocolEnvelope): Promise<void> {
   if (action.type === "browser_navigate") {
     if (!action.url) {
       sendActionFailed(envelope, "Missing URL for browser_navigate");
-      return;
+      return { success: false, summary: "Missing URL for browser_navigate" };
     }
     try {
       const targetUrl = normalizeUrl(action.url);
@@ -174,27 +185,24 @@ async function handleActionRequest(envelope: ProtocolEnvelope): Promise<void> {
         tabId = created.id;
         if (tabId) await waitForTabComplete(tabId);
       }
+      const summary = `Navigated to ${targetUrl}`;
       sendActionFinished(envelope, {
         success: true,
         verified: true,
         url: targetUrl,
-        outcome_summary: `Navigated to ${targetUrl}`,
+        outcome_summary: summary,
       });
+      return { success: true, summary, tabId };
     } catch (err: any) {
-      sendActionFailed(envelope, err?.message || "Navigation failed");
+      const msg = err?.message || "Navigation failed";
+      sendActionFailed(envelope, msg);
+      return { success: false, summary: msg, tabId };
     }
-    return;
   }
 
   if (!tabId) {
     sendActionFailed(envelope, "No active browser tab found");
-    return;
-  }
-
-  // Try attaching debugger for CDP actions; fall back to chrome.scripting if blocked
-  let hasCdp = tabManager.isAttached(tabId);
-  if (!hasCdp) {
-    hasCdp = await tabManager.attachTab(tabId);
+    return { success: false, summary: "No active browser tab found" };
   }
 
   // Notify overlay about action preview
@@ -211,135 +219,199 @@ async function handleActionRequest(envelope: ProtocolEnvelope): Promise<void> {
     let outcome: any = { success: true, verified: true };
 
     switch (action.type) {
-      case "browser_click":
-        if (hasCdp) {
-          if (action.locator?.point) {
-            await cdp.click(tabId, action.locator.point.x, action.locator.point.y);
-          } else {
-            const resolved = await cdp.evaluate(
-              tabId,
-              `(${resolveInPage})(${JSON.stringify(action.locator || {})})`
-            );
-            if (!resolved || !resolved.found) {
-              sendActionFailed(envelope, `Element not found for locator: ${JSON.stringify(action.locator)}`);
-              return;
+      case "browser_click": {
+        const [clickRes] = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: (loc: any) => {
+            function isVisible(el: Element): boolean {
+              const rect = el.getBoundingClientRect();
+              if (rect.width <= 0 || rect.height <= 0) return false;
+              const style = window.getComputedStyle(el);
+              return style.visibility !== "hidden" && style.display !== "none" && style.opacity !== "0";
             }
-            await cdp.click(tabId, resolved.box.centerX, resolved.box.centerY);
-          }
-        } else {
-          const [res] = await chrome.scripting.executeScript({
-            target: { tabId },
-            func: (loc: any) => {
-              const el = loc?.selector
-                ? document.querySelector(loc.selector)
-                : Array.from(document.querySelectorAll("button, a, input, [role]")).find((e) =>
-                    (e.getAttribute("aria-label") || e.textContent || "")
-                      .toLowerCase()
-                      .includes((loc?.name || "").toLowerCase())
-                  );
-              if (!el) return false;
-              (el as HTMLElement).click();
-              return true;
-            },
-            args: [action.locator || {}],
-          });
-          if (!res?.result) {
-            sendActionFailed(envelope, `Element not found for locator: ${JSON.stringify(action.locator)}`);
-            return;
-          }
-        }
-        outcome = { success: true, verified: true };
-        break;
 
-      case "browser_type":
-        if (hasCdp) {
-          if (action.locator) {
-            const resolved = await cdp.evaluate(
-              tabId,
-              `(${resolveInPage})(${JSON.stringify(action.locator)})`
-            );
-            if (resolved?.found) {
-              await cdp.click(tabId, resolved.box.centerX, resolved.box.centerY);
+            function triggerClick(el: HTMLElement): string {
+              el.scrollIntoView({ block: "center", inline: "center" });
+              const rect = el.getBoundingClientRect();
+              const cx = rect.left + rect.width / 2;
+              const cy = rect.top + rect.height / 2;
+              const opts = { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy };
+              el.dispatchEvent(new PointerEvent("pointerdown", opts));
+              el.dispatchEvent(new MouseEvent("mousedown", opts));
+              el.dispatchEvent(new PointerEvent("pointerup", opts));
+              el.dispatchEvent(new MouseEvent("mouseup", opts));
+              el.click();
+              const label =
+                el.getAttribute("aria-label") ||
+                (el as HTMLInputElement).value ||
+                (el.textContent || "").trim().slice(0, 60) ||
+                el.tagName.toLowerCase();
+              return `Clicked "${label}"`;
             }
-          }
-          if (action.text) {
-            await cdp.type(tabId, action.text);
-          }
-        } else {
-          await chrome.scripting.executeScript({
-            target: { tabId },
-            func: (loc: any, text: string) => {
-              const el = (loc?.selector
-                ? document.querySelector(loc.selector)
-                : document.activeElement || document.querySelector("input, textarea")) as HTMLInputElement | null;
-              if (el) {
-                el.focus();
-                el.value = text;
-                el.dispatchEvent(new Event("input", { bubbles: true }));
-                el.dispatchEvent(new Event("change", { bubbles: true }));
+
+            if (loc?.point) {
+              const target = document.elementFromPoint(loc.point.x, loc.point.y) as HTMLElement | null;
+              if (target) return { ok: true, summary: triggerClick(target) };
+            }
+
+            if (loc?.selector) {
+              try {
+                const el = document.querySelector(loc.selector) as HTMLElement | null;
+                if (el && isVisible(el)) {
+                  return { ok: true, summary: triggerClick(el) };
+                }
+              } catch {
+                // Invalid selector, fall through to name search
               }
-            },
-            args: [action.locator || {}, action.text || ""],
-          });
-        }
-        outcome = { success: true, verified: true };
-        break;
+            }
 
-      case "browser_keypress":
+            const query = (loc?.name || loc?.selector || "").trim().toLowerCase();
+            if (!query) return { ok: false, error: "Empty click locator" };
+
+            const candidates = Array.from(
+              document.querySelectorAll(
+                'button, a, input[type="button"], input[type="submit"], [role="button"], [role="link"], [role="menuitem"], [role="option"], [role="tab"], [role="checkbox"], mat-select, mat-option, summary, label, [onclick]'
+              )
+            ).filter(isVisible) as HTMLElement[];
+
+            let bestEl: HTMLElement | null = null;
+            let bestScore = -1;
+
+            for (const el of candidates) {
+              const aria = (el.getAttribute("aria-label") || "").trim().toLowerCase();
+              const title = (el.getAttribute("title") || "").trim().toLowerCase();
+              const text = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
+              const val = ((el as HTMLInputElement).value || "").trim().toLowerCase();
+
+              let score = -1;
+              if (aria === query || text === query || title === query || val === query) {
+                score = 1000 - text.length;
+              } else if (aria.includes(query) || title.includes(query) || val.includes(query)) {
+                score = 700 - aria.length;
+              } else if (text.includes(query)) {
+                score = 500 - Math.min(text.length, 400);
+              }
+
+              if (score > bestScore) {
+                bestScore = score;
+                bestEl = el;
+              }
+            }
+
+            if (bestEl) {
+              return { ok: true, summary: triggerClick(bestEl) };
+            }
+
+            return { ok: false, error: `Could not find clickable element matching "${loc?.name || loc?.selector}"` };
+          },
+          args: [action.locator || {}],
+        });
+
+        const result = clickRes?.result as { ok: boolean; summary?: string; error?: string } | undefined;
+        if (!result?.ok) {
+          const errMsg = result?.error || `Element not found: ${JSON.stringify(action.locator)}`;
+          sendActionFailed(envelope, errMsg);
+          return { success: false, summary: errMsg, tabId };
+        }
+        outcome = { success: true, verified: true, outcome_summary: result.summary };
+        break;
+      }
+
+      case "browser_type": {
+        const [typeRes] = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: (loc: any, text: string) => {
+            function isVisible(el: Element): boolean {
+              const rect = el.getBoundingClientRect();
+              return rect.width > 0 && rect.height > 0;
+            }
+
+            let target: HTMLInputElement | HTMLTextAreaElement | null = null;
+            if (loc?.selector) {
+              try {
+                target = document.querySelector(loc.selector) as HTMLInputElement | null;
+              } catch {
+                // ignore invalid selector
+              }
+            }
+            if (!target && loc?.name) {
+              const q = loc.name.toLowerCase();
+              const inputs = Array.from(
+                document.querySelectorAll('input:not([type="hidden"]), textarea, [contenteditable="true"]')
+              ).filter(isVisible) as HTMLInputElement[];
+              target =
+                inputs.find((i) => {
+                  const aria = (i.getAttribute("aria-label") || "").toLowerCase();
+                  const ph = (i.getAttribute("placeholder") || "").toLowerCase();
+                  const name = (i.getAttribute("name") || "").toLowerCase();
+                  const id = (i.id || "").toLowerCase();
+                  return aria.includes(q) || ph.includes(q) || name.includes(q) || id.includes(q);
+                }) || null;
+            }
+            if (!target) {
+              target = (document.activeElement as HTMLInputElement) || document.querySelector("input, textarea");
+            }
+            if (!target) return { ok: false, error: "No input field found on page" };
+
+            target.scrollIntoView({ block: "center", inline: "center" });
+            target.focus();
+            target.value = text;
+            target.dispatchEvent(new Event("input", { bubbles: true }));
+            target.dispatchEvent(new Event("change", { bubbles: true }));
+            return { ok: true, summary: `Typed into ${target.getAttribute("aria-label") || target.placeholder || target.tagName}` };
+          },
+          args: [action.locator || {}, action.text || ""],
+        });
+
+        const result = typeRes?.result as { ok: boolean; summary?: string; error?: string } | undefined;
+        if (!result?.ok) {
+          const errMsg = result?.error || "Could not type into input";
+          sendActionFailed(envelope, errMsg);
+          return { success: false, summary: errMsg, tabId };
+        }
+        outcome = { success: true, verified: true, outcome_summary: result.summary };
+        break;
+      }
+
+      case "browser_keypress": {
+        let hasCdp = tabManager.isAttached(tabId);
+        if (!hasCdp) hasCdp = await tabManager.attachTab(tabId);
         if (hasCdp && action.key) {
           await cdp.keypress(tabId, action.key);
         }
-        outcome = { success: true, verified: true };
+        outcome = { success: true, verified: true, outcome_summary: `Pressed ${action.key}` };
         break;
+      }
 
-      case "browser_scroll":
+      case "browser_scroll": {
         const dir = action.scroll_direction || "down";
-        const amt = action.scroll_amount || 400;
+        const amt = action.scroll_amount || 450;
         const deltaY = dir === "down" ? amt : dir === "up" ? -amt : 0;
         const deltaX = dir === "right" ? amt : dir === "left" ? -amt : 0;
-        if (hasCdp) {
-          await cdp.evaluate(tabId, `window.scrollBy(${deltaX}, ${deltaY})`);
-        } else {
-          await chrome.scripting.executeScript({
-            target: { tabId },
-            func: (dx: number, dy: number) => window.scrollBy(dx, dy),
-            args: [deltaX, deltaY],
-          });
-        }
-        outcome = { success: true, verified: true };
+        await chrome.scripting.executeScript({
+          target: { tabId },
+          func: (dx: number, dy: number) => window.scrollBy({ left: dx, top: dy, behavior: "smooth" }),
+          args: [deltaX, deltaY],
+        });
+        outcome = { success: true, verified: true, outcome_summary: `Scrolled ${dir} (${amt}px)` };
         break;
+      }
 
-      case "browser_snapshot":
-        const snapshot = hasCdp
-          ? await cdp.evaluate(
-              tabId,
-              `({
-                title: document.title,
-                url: window.location.href,
-                elements: Array.from(document.querySelectorAll("button, a, input, select, [role]")).map(e => ({
-                  tag: e.tagName.toLowerCase(),
-                  role: e.getAttribute("role") || e.tagName.toLowerCase(),
-                  name: e.getAttribute("aria-label") || (e.textContent || "").trim().slice(0, 50),
-                  type: (e as HTMLInputElement).type || null,
-                  disabled: (e as HTMLButtonElement).disabled || false
-                }))
-              })`
-            )
-          : (
-              await chrome.scripting.executeScript({
-                target: { tabId },
-                func: () => ({ title: document.title, url: window.location.href }),
-              })
-            )[0]?.result;
-        outcome = { success: true, verified: true, snapshot };
+      case "browser_snapshot": {
+        const snap = await observeTab(tabId);
+        outcome = { success: true, verified: true, snapshot: snap };
         break;
+      }
 
-      case "browser_screenshot":
+      case "browser_screenshot": {
+        let hasCdp = tabManager.isAttached(tabId);
+        if (!hasCdp) hasCdp = await tabManager.attachTab(tabId);
         const screenshot = hasCdp ? await cdp.captureScreenshot(tabId) : "";
         outcome = { success: true, verified: true, screenshot_base64: screenshot };
         break;
+      }
 
-      case "browser_download":
+      case "browser_download": {
         if (action.url) {
           const downloadId = await new Promise<number>((resolve, reject) => {
             chrome.downloads.download(
@@ -357,70 +429,180 @@ async function handleActionRequest(envelope: ProtocolEnvelope): Promise<void> {
               }
             );
           });
-          outcome = { success: true, verified: true, download_id: downloadId, url: action.url };
+          outcome = {
+            success: true,
+            verified: true,
+            download_id: downloadId,
+            url: action.url,
+            outcome_summary: `Downloaded ${action.url}`,
+          };
         } else {
           sendActionFailed(envelope, "Missing url for browser_download");
-          return;
+          return { success: false, summary: "Missing url for browser_download", tabId };
         }
         break;
+      }
 
-      case "browser_upload":
+      case "browser_upload": {
         const uploadSelector = action.locator?.selector || 'input[type="file"]';
         const files = action.file_paths || [];
         if (files.length === 0) {
           sendActionFailed(envelope, "No file_paths specified for browser_upload");
-          return;
+          return { success: false, summary: "No file_paths specified", tabId };
         }
+        let hasCdp = tabManager.isAttached(tabId);
+        if (!hasCdp) hasCdp = await tabManager.attachTab(tabId);
         const uploadSuccess = hasCdp ? await cdp.setFileInputFiles(tabId, uploadSelector, files) : false;
         outcome = { success: uploadSuccess, verified: uploadSuccess, uploaded_files: files };
         break;
+      }
 
-      case "browser_verify":
-        const verified = hasCdp
-          ? await cdp.evaluate(
-              tabId,
-              `Boolean(${JSON.stringify(action.locator?.selector)} ? document.querySelector(${JSON.stringify(action.locator?.selector)}) : document.body.innerText.includes(${JSON.stringify(action.text || "")}))`
-            )
-          : Boolean(
-              (
-                await chrome.scripting.executeScript({
-                  target: { tabId },
-                  func: (sel: string | undefined, txt: string) =>
-                    Boolean(sel ? document.querySelector(sel) : document.body.innerText.includes(txt)),
-                  args: [action.locator?.selector, action.text || ""],
-                })
-              )[0]?.result
-            );
-        outcome = { success: verified, verified };
+      case "browser_verify": {
+        const [verRes] = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: (sel: string | undefined, txt: string) =>
+            Boolean(sel ? document.querySelector(sel) : document.body.innerText.includes(txt)),
+          args: [action.locator?.selector, action.text || ""],
+        });
+        const verified = Boolean(verRes?.result);
+        outcome = { success: verified, verified, outcome_summary: verified ? "Verified" : "Verification failed" };
         break;
+      }
 
       default:
         outcome = { success: true, verified: true };
     }
 
     sendActionFinished(envelope, outcome);
+    return {
+      success: true,
+      summary: outcome?.outcome_summary || `${action.type} succeeded`,
+      tabId,
+    };
   } catch (err: any) {
-    sendActionFailed(envelope, err.message || "Action failed");
+    const msg = err?.message || "Action failed";
+    sendActionFailed(envelope, msg);
+    return { success: false, summary: msg, tabId };
   }
 }
 
-function resolveInPage(locator: any): any {
-  if (locator.selector) {
-    const el = document.querySelector(locator.selector);
-    if (el) {
-      const r = el.getBoundingClientRect();
-      return { found: true, box: { centerX: r.left + r.width / 2, centerY: r.top + r.height / 2 } };
-    }
+interface TabObservation {
+  url: string;
+  title: string;
+  headings: string[];
+  elements: Array<{
+    index: number;
+    tag: string;
+    role: string;
+    label: string;
+    selector: string;
+    href?: string;
+  }>;
+}
+
+async function observeTab(tabId?: number | null): Promise<TabObservation> {
+  const tab = await resolveActiveTab(tabId);
+  if (!tab?.id) {
+    return { url: "about:blank", title: "No Tab", headings: [], elements: [] };
   }
-  const elements = Array.from(document.querySelectorAll("button, a, input, [role]"));
-  for (const el of elements) {
-    const name = el.getAttribute("aria-label") || el.textContent || "";
-    if (locator.name && name.toLowerCase().includes(locator.name.toLowerCase())) {
-      const r = el.getBoundingClientRect();
-      return { found: true, box: { centerX: r.left + r.width / 2, centerY: r.top + r.height / 2 } };
-    }
+  const currentUrl = tab.url || "about:blank";
+  const currentTitle = tab.title || "Untitled";
+  if (/^(chrome|edge|about|devtools|chrome-extension):/i.test(currentUrl)) {
+    return { url: currentUrl, title: currentTitle, headings: [], elements: [] };
   }
-  return { found: false };
+
+  try {
+    const [res] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => {
+        function isVisible(el: Element): boolean {
+          const r = el.getBoundingClientRect();
+          if (r.width <= 1 || r.height <= 1) return false;
+          const style = window.getComputedStyle(el);
+          return style.visibility !== "hidden" && style.display !== "none" && style.opacity !== "0";
+        }
+
+        function buildSelector(el: Element): string {
+          if (el.id && /^[a-zA-Z][\w-]*$/.test(el.id)) {
+            return `#${el.id}`;
+          }
+          const testId =
+            el.getAttribute("data-test-id") ||
+            el.getAttribute("data-testid") ||
+            el.getAttribute("cfc-test-id");
+          if (testId) return `[data-test-id="${testId}"], [data-testid="${testId}"], [cfc-test-id="${testId}"]`;
+          const aria = el.getAttribute("aria-label");
+          if (aria && !aria.includes('"') && aria.length < 60) {
+            return `${el.tagName.toLowerCase()}[aria-label="${aria}"]`;
+          }
+          const name = el.getAttribute("name");
+          if (name && !name.includes('"')) {
+            return `${el.tagName.toLowerCase()}[name="${name}"]`;
+          }
+          return "";
+        }
+
+        const headings = Array.from(document.querySelectorAll('h1, h2, h3, [role="heading"], [role="dialog"] h2'))
+          .filter(isVisible)
+          .map((h) => (h.textContent || "").replace(/\s+/g, " ").trim())
+          .filter(Boolean)
+          .slice(0, 10);
+
+        const rawEls = Array.from(
+          document.querySelectorAll(
+            'button, a[href], input:not([type="hidden"]), select, textarea, [role="button"], [role="menuitem"], [role="option"], [role="tab"], [role="checkbox"], mat-select, mat-option'
+          )
+        ).filter(isVisible);
+
+        const elements: Array<{
+          index: number;
+          tag: string;
+          role: string;
+          label: string;
+          selector: string;
+          href?: string;
+        }> = [];
+        const seenLabels = new Set<string>();
+
+        for (const el of rawEls) {
+          if (elements.length >= 55) break;
+          const aria = (el.getAttribute("aria-label") || "").trim();
+          const placeholder = (el.getAttribute("placeholder") || "").trim();
+          const title = (el.getAttribute("title") || "").trim();
+          const text = ((el as HTMLElement).innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+          const label = (aria || text || placeholder || title).slice(0, 80);
+          if (!label) continue;
+
+          const tag = el.tagName.toLowerCase();
+          const role = el.getAttribute("role") || tag;
+          const selector = buildSelector(el);
+          const href = tag === "a" ? (el as HTMLAnchorElement).href : undefined;
+          const dedupeKey = `${tag}:${label}:${selector}`;
+          if (seenLabels.has(dedupeKey)) continue;
+          seenLabels.add(dedupeKey);
+
+          elements.push({
+            index: elements.length,
+            tag,
+            role,
+            label,
+            selector,
+            href: href && !href.startsWith("javascript:") ? href.slice(0, 100) : undefined,
+          });
+        }
+
+        return {
+          url: window.location.href,
+          title: document.title,
+          headings,
+          elements,
+        };
+      },
+    });
+    return (res?.result as TabObservation) || { url: currentUrl, title: currentTitle, headings: [], elements: [] };
+  } catch {
+    return { url: currentUrl, title: currentTitle, headings: [], elements: [] };
+  }
 }
 
 function sendActionFinished(envelope: ProtocolEnvelope, outcome: any): void {
@@ -495,6 +677,9 @@ function sendActionFailed(envelope: ProtocolEnvelope, error: string): void {
   nativePort.send(failedEnvelope);
 }
 
+// Track active multi-step agent runs so PAUSE / STOP work immediately
+const activeRuns: Map<string, { status: "running" | "paused" | "stopped"; token: number }> = new Map();
+
 // Side panel communication
 chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   if (request.type === "GET_BRIDGE_STATUS") {
@@ -517,15 +702,25 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     });
     return true;
   } else if (request.type === "DISPATCH_CONTROL") {
+    const runId = request.run_id || "run_1";
     nativePort.send({
       command: request.command,
-      run_id: request.run_id,
+      run_id: runId,
       epoch: request.epoch,
       instruction: request.instruction,
     });
-    if (request.command === "steer" && request.instruction) {
+    if (request.command === "stop" || request.command === "take_over") {
+      const current = activeRuns.get(runId);
+      if (current) current.status = "stopped";
+    } else if (request.command === "pause") {
+      const current = activeRuns.get(runId);
+      if (current) current.status = "paused";
+    } else if (request.command === "restart") {
+      const current = activeRuns.get(runId);
+      if (current) current.status = "stopped";
+    } else if (request.command === "steer" && request.instruction) {
       void handleUserChat(
-        request.run_id || "run_1",
+        runId,
         request.epoch || 0,
         request.instruction,
         request.history || [],
@@ -619,12 +814,26 @@ function inferActionFromUserIntent(userText: string): ActionPayload | null {
     return { type: "browser_navigate", url: normalizeUrl(dotNormalized) } as ActionPayload;
   }
 
-  // Natural language navigation (single or multi-word): "navigate to my Google cloud consuil", "go to example dot com", "open github"
+  // Check if user mentions a known console/site anywhere in a navigation/credential command
+  for (const entry of KNOWN_SITES) {
+    if (
+      entry.pattern.test(trimmed) &&
+      /\b(navigate|navagate|nav|go|open|visit|browse|find|create|get|download|enable|console|consuil|oauth|credentials?)\b/i.test(
+        trimmed
+      )
+    ) {
+      return { type: "browser_navigate", url: entry.url } as ActionPayload;
+    }
+  }
+
+  // Natural language navigation (single or multi-word): "navigate to my Google cloud consuil", "go to example dot com"
   const navMatch = trimmed.match(
     /^(?:please\s+|can\s+you\s+|could\s+you\s+)?(?:navigate|navagate|nav|go|open|visit|browse|head|take\s+me|switch|load|launch)\s+(?:to\s+|up\s+|into\s+)?(.+?)[?.!]*$/i
   );
   if (navMatch && navMatch[1]) {
-    const rawTarget = navMatch[1].trim();
+    const rawTarget = navMatch[1]
+      .split(/\b(?:and\s+then|and\s+find|and\s+create|then\s+|find\s+my)\b/i)[0]
+      .trim();
     return { type: "browser_navigate", url: normalizeUrl(rawTarget) } as ActionPayload;
   }
 
@@ -663,61 +872,66 @@ function inferActionFromUserIntent(userText: string): ActionPayload | null {
   return null;
 }
 
-function extractActionAndCleanReply(
+function extractStepFromModelReply(
   replyText: string,
-  userText: string
-): { cleanReply: string; action: ActionPayload | null } {
+  userText: string,
+  isFirstStep: boolean
+): { cleanReply: string; action: ActionPayload | null; done: boolean } {
   let cleanReply = replyText;
   let action: ActionPayload | null = null;
+  let done = false;
 
-  // 1. Check fenced code blocks first
   const fenceRegex = /```(?:json)?\s*([\s\S]*?)```/gi;
   let match: RegExpExecArray | null;
   while ((match = fenceRegex.exec(replyText)) !== null) {
     const objs = extractBalancedJsonObjects(match[1]);
     for (const obj of objs) {
-      const candidate = obj.parsed?.action || obj.parsed;
+      if (typeof obj.parsed?.done === "boolean") done = obj.parsed.done;
+      if (typeof obj.parsed?.thought === "string" && !cleanReply.replace(match[0], "").trim()) {
+        cleanReply = obj.parsed.thought;
+      }
+      const candidate = obj.parsed?.action || (obj.parsed?.type ? obj.parsed : null);
       if (candidate && typeof candidate.type === "string") {
         action = candidate as ActionPayload;
-        cleanReply = cleanReply.replace(match[0], "").trim();
+        cleanReply = cleanReply.replace(match[0], "").trim() || obj.parsed?.thought || "";
         break;
       }
     }
     if (action) break;
   }
 
-  // 2. If not in fenced block, check inline balanced JSON objects
   if (!action) {
     const objs = extractBalancedJsonObjects(replyText);
     for (const obj of objs) {
-      const candidate = obj.parsed?.action || obj.parsed;
+      if (typeof obj.parsed?.done === "boolean") done = obj.parsed.done;
+      const candidate = obj.parsed?.action || (obj.parsed?.type ? obj.parsed : null);
       if (candidate && typeof candidate.type === "string") {
         action = candidate as ActionPayload;
-        cleanReply = cleanReply.replace(obj.raw, "").trim();
+        cleanReply = cleanReply.replace(obj.raw, "").trim() || obj.parsed?.thought || "";
         break;
       }
     }
   }
 
-  // 3. Normalize action type aliases if LLM emitted "navigate" instead of "browser_navigate"
   if (action && !action.type.startsWith("browser_")) {
     action = { ...action, type: `browser_${action.type}` as any };
   }
 
-  // 4. If user had navigation intent and LLM wrote an https:// URL in prose/markdown without JSON, extract it
-  if (!action && /\b(navigate|navagate|nav|go|open|visit|browse|take\s+me|launch|load)\b/i.test(userText)) {
+  if (
+    !action &&
+    isFirstStep &&
+    /\b(navigate|navagate|nav|go|open|visit|browse|take\s+me|launch|load)\b/i.test(userText)
+  ) {
     const urlInReply = replyText.match(/https?:\/\/[^\s)"'`>\]]+/i);
     if (urlInReply && urlInReply[0]) {
       action = { type: "browser_navigate", url: urlInReply[0].replace(/[.,;]+$/, "") } as ActionPayload;
     }
   }
 
-  // 5. Deterministic fallback if user explicitly asked to navigate/search/click/scroll
-  if (!action) {
+  if (!action && isFirstStep) {
     action = inferActionFromUserIntent(userText);
   }
 
-  // 6. If we resolved a browser action, suppress any false LLM refusal text ("I cannot open websites...")
   if (action && /\b(cannot|can't|unable|don't have access|as an ai|do not have the ability)\b/i.test(cleanReply)) {
     cleanReply =
       action.type === "browser_navigate"
@@ -725,7 +939,40 @@ function extractActionAndCleanReply(
         : `Executing ${action.type}...`;
   }
 
-  return { cleanReply, action };
+  return { cleanReply, action, done };
+}
+
+async function callNvidiaNim(
+  apiKey: string,
+  messages: Array<{ role: "system" | "user" | "assistant"; content: string }>
+): Promise<{ content: string; modelUsed: string }> {
+  for (const model of ACTIVE_NIM_MODELS) {
+    try {
+      const res = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages,
+          temperature: 0.15,
+          max_tokens: 450,
+        }),
+      });
+      if (!res.ok) continue;
+      const data: any = await res.json();
+      const msg = data?.choices?.[0]?.message;
+      const content = (msg?.content || msg?.reasoning_content || "").trim();
+      if (content) {
+        return { content, modelUsed: model };
+      }
+    } catch {
+      // Try next fallback model
+    }
+  }
+  return { content: "", modelUsed: ACTIVE_NIM_MODELS[0] };
 }
 
 async function handleUserChat(
@@ -735,18 +982,19 @@ async function handleUserChat(
   history: Array<{ role: string; text: string }>,
   preferredTabId?: number | null
 ): Promise<void> {
+  const runToken = Date.now();
+  activeRuns.set(runId, { status: "running", token: runToken });
+
   try {
-    const activeTab = await resolveActiveTab(preferredTabId);
-    const tabContext = activeTab
-      ? `Active Chrome Tab: "${activeTab.title || "Untitled"}" (${activeTab.url || "about:blank"})`
-      : "No active browser tab detected.";
+    let activeTab = await resolveActiveTab(preferredTabId);
+    let currentTabId = activeTab?.id;
 
     const apiKey = await getNvidiaApiKey();
     if (!apiKey) {
       const fallbackAction = inferActionFromUserIntent(userText);
       if (fallbackAction) {
         broadcastChatResponse(runId, epoch, `Executing ${fallbackAction.type}...`, "local");
-        await dispatchBrowserAction(runId, epoch, activeTab?.id, fallbackAction);
+        await dispatchBrowserAction(runId, epoch, currentTabId, fallbackAction);
         return;
       }
       broadcastChatResponse(
@@ -758,78 +1006,132 @@ async function handleUserChat(
       return;
     }
 
-    const systemPrompt = [
-      "You are the OpenCode Chrome Relay browser automation agent running inside the user's Chrome Side Panel with full permission to control their active browser tab.",
-      tabContext,
-      "Keep replies concise (1 sentence) without filler.",
-      "CRITICAL: NEVER refuse to navigate to a website or user console (such as 'my Google Cloud Console', 'my Gmail', 'GitHub', etc.). Always resolve the destination to its canonical URL (even if the user has typos like 'navagate to my Google cloud consuil' -> 'https://console.cloud.google.com', or 'example dot com' -> 'https://example.com') and include the JSON action block at the end of your reply:",
-      '```json\n{"action":{"type":"browser_navigate","url":"https://console.cloud.google.com"}}\n```',
-      'Supported action types: "browser_navigate" (with "url"), "browser_click" (with "locator":{"selector":"...","name":"..."}), "browser_type" (with "locator":{"selector":"..."},"text":"..."), "browser_scroll" (with "scroll_direction":"down"|"up","scroll_amount":400).',
-      "For normal chat or questions (like 'ping'), reply in plain text without any JSON block.",
-    ].join("\n");
+    const MAX_STEPS = 10;
+    const stepHistory: string[] = [];
 
-    const priorMessages = history
-      .slice(-8)
-      .filter((m) => m.text && m.text !== "Thinking...")
-      .map((m) => ({
-        role: (m.role === "agent" ? "assistant" : "user") as "assistant" | "user",
-        content: m.text,
-      }));
-
-    if (priorMessages.length === 0 || priorMessages[priorMessages.length - 1].content !== userText) {
-      priorMessages.push({ role: "user", content: userText });
-    }
-
-    let replyText = "";
-    let modelUsed = ACTIVE_NIM_MODELS[0];
-
-    for (const model of ACTIVE_NIM_MODELS) {
-      try {
-        const res = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${apiKey}`,
-          },
-          body: JSON.stringify({
-            model,
-            messages: [{ role: "system", content: systemPrompt }, ...priorMessages],
-            temperature: 0.2,
-            max_tokens: 400,
-          }),
-        });
-
-        if (!res.ok) continue;
-        const data: any = await res.json();
-        const msg = data?.choices?.[0]?.message;
-        const content = (msg?.content || msg?.reasoning_content || "").trim();
-        if (content) {
-          replyText = content;
-          modelUsed = model;
-          break;
-        }
-      } catch {
-        // Try next model
+    for (let step = 1; step <= MAX_STEPS; step++) {
+      const runState = activeRuns.get(runId);
+      if (!runState || runState.token !== runToken || runState.status === "stopped") {
+        break;
       }
-    }
+      while (activeRuns.get(runId)?.status === "paused") {
+        await new Promise((r) => setTimeout(r, 400));
+        if (activeRuns.get(runId)?.status === "stopped") return;
+      }
 
-    const { cleanReply, action: parsedAction } = extractActionAndCleanReply(replyText, userText);
+      const obs = await observeTab(currentTabId);
+      const elementsSummary =
+        obs.elements.length > 0
+          ? obs.elements
+              .map(
+                (e) =>
+                  `[${e.index}] <${e.tag}> "${e.label}"${e.selector ? ` selector='${e.selector}'` : ""}${
+                    e.href ? ` href='${e.href}'` : ""
+                  }`
+              )
+              .join("\n")
+          : "(No interactive DOM elements visible or on internal browser page)";
 
-    const displayMessage =
-      cleanReply ||
-      (parsedAction?.type === "browser_navigate"
-        ? `Navigating to ${parsedAction.url}...`
-        : parsedAction
-          ? `Executing ${parsedAction.type}...`
-          : "Pong! Agent is ready.");
+      const systemPrompt = [
+        "You are the OpenCode Chrome Relay autonomous multi-step browser agent running inside the user's Chrome Side Panel.",
+        "You have full permission to navigate and interact with the user's logged-in Chrome browser tabs.",
+        "CRITICAL RULES:",
+        "1. NEVER refuse a task or claim you cannot access personal accounts/consoles.",
+        "2. For normal chat (like 'ping' or questions that need no browser actions), reply concisely in plain text with no JSON block.",
+        "3. For single or multi-step browser tasks, execute ONE action per step based on the Current Page Observation and Past Steps.",
+        "4. Useful Google Cloud Console direct URLs (use browser_navigate to jump directly when relevant):",
+        "   - APIs & Credentials (OAuth Client IDs / Secrets): https://console.cloud.google.com/apis/credentials",
+        "   - Create OAuth Client ID directly: https://console.cloud.google.com/apis/credentials/oauthclient",
+        "   - Enable YouTube Data API v3: https://console.cloud.google.com/apis/library/youtube.googleapis.com",
+        "   - Enable YouTube Analytics API: https://console.cloud.google.com/apis/library/youtubeanalytics.googleapis.com",
+        "   - IAM & Admin Permissions: https://console.cloud.google.com/iam-admin/iam",
+        "5. Output a brief 1-sentence explanation of the current step followed by a JSON block in this exact format:",
+        '```json\n{"done":false,"action":{"type":"browser_navigate","url":"https://console.cloud.google.com/apis/credentials"}}\n```',
+        '   - For clicking an element from the observation list: {"done":false,"action":{"type":"browser_click","locator":{"name":"exact button label","selector":"optional css selector"}}}',
+        '   - For typing into an input: {"done":false,"action":{"type":"browser_type","locator":{"name":"field label","selector":"optional css selector"},"text":"value"}}',
+        '   - For scrolling: {"done":false,"action":{"type":"browser_scroll","scroll_direction":"down","scroll_amount":450}}',
+        '   - When the user goal is complete (or awaiting user sign-in/confirmation), set "done":true and omit "action".',
+      ].join("\n");
 
-    broadcastChatResponse(runId, epoch, displayMessage, modelUsed);
+      const stepContext = [
+        `User Goal: ${userText}`,
+        `Current Step: ${step} of ${MAX_STEPS}`,
+        `Current Tab URL: ${obs.url}`,
+        `Current Tab Title: ${obs.title}`,
+        obs.headings.length ? `Visible Headings: ${obs.headings.join(" | ")}` : "",
+        stepHistory.length ? `Actions Taken So Far:\n${stepHistory.join("\n")}` : "Actions Taken So Far: (none yet)",
+        `Visible Interactive Elements on Page:\n${elementsSummary}`,
+      ]
+        .filter(Boolean)
+        .join("\n\n");
 
-    if (parsedAction) {
-      await dispatchBrowserAction(runId, epoch, activeTab?.id, parsedAction);
+      const priorChat =
+        step === 1
+          ? history
+              .slice(-4)
+              .filter((m) => m.text && m.text !== "Thinking...")
+              .map((m) => ({
+                role: (m.role === "agent" ? "assistant" : "user") as "assistant" | "user",
+                content: m.text,
+              }))
+          : [];
+
+      const { content: replyText, modelUsed } = await callNvidiaNim(apiKey, [
+        { role: "system", content: systemPrompt },
+        ...priorChat,
+        { role: "user", content: stepContext },
+      ]);
+
+      const { cleanReply, action: parsedAction, done } = extractStepFromModelReply(
+        replyText,
+        userText,
+        step === 1
+      );
+
+      const displayMessage =
+        cleanReply ||
+        (parsedAction?.type === "browser_navigate"
+          ? `Step ${step}: Navigating to ${parsedAction.url}...`
+          : parsedAction
+            ? `Step ${step}: Executing ${parsedAction.type}...`
+            : "Task complete.");
+
+      broadcastChatResponse(runId, epoch, displayMessage, modelUsed);
+
+      if (!parsedAction || done) {
+        break;
+      }
+
+      const execRes = await dispatchBrowserAction(runId, epoch, currentTabId, parsedAction);
+      if (execRes.tabId) currentTabId = execRes.tabId;
+
+      stepHistory.push(
+        `Step ${step}: ${parsedAction.type} (${
+          parsedAction.url || parsedAction.locator?.name || parsedAction.locator?.selector || ""
+        }) -> ${execRes.success ? "SUCCESS" : "FAILED"}: ${execRes.summary}`
+      );
+
+      // If this was a simple 1-step navigation request (e.g. "navigate to example.com") with no follow-up clauses, finish after step 1
+      const isSimpleNavOnly =
+        step === 1 &&
+        parsedAction.type === "browser_navigate" &&
+        !/\b(find|create|click|download|enable|fill|type|select|delete|update|and\s+then|then)\b/i.test(
+          userText.replace(/^(?:please\s+)?(?:navigate|navagate|go|open|visit)\s+(?:to\s+)?/i, "")
+        );
+      if (isSimpleNavOnly) {
+        break;
+      }
+
+      // Wait briefly for SPA rendering / dialogs to settle before next observation
+      await new Promise((r) => setTimeout(r, 1800));
     }
   } catch (err: any) {
     broadcastChatResponse(runId, epoch, `Error: ${err?.message || "Failed to contact agent"}`, "error");
+  } finally {
+    const current = activeRuns.get(runId);
+    if (current?.token === runToken) {
+      activeRuns.delete(runId);
+    }
   }
 }
 
@@ -838,7 +1140,7 @@ async function dispatchBrowserAction(
   epoch: number,
   tabId: number | undefined,
   action: ActionPayload
-): Promise<void> {
+): Promise<{ success: boolean; summary: string; tabId?: number }> {
   const actionEnvelope: ProtocolEnvelope = {
     v: 1,
     event: "action.started",
@@ -847,7 +1149,7 @@ async function dispatchBrowserAction(
     run_id: runId,
     epoch,
     tab_id: tabId,
-    idempotency_key: `idem_${Date.now()}`,
+    idempotency_key: `idem_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     action,
   };
   try {
@@ -855,7 +1157,7 @@ async function dispatchBrowserAction(
   } catch {
     // Sidepanel closed
   }
-  await handleActionRequest(actionEnvelope);
+  return await handleActionRequest(actionEnvelope);
 }
 
 function broadcastChatResponse(runId: string, epoch: number, text: string, model: string): void {

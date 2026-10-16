@@ -549,6 +549,11 @@ chrome.runtime.onMessage.addListener((msg) => {
         text: replyText,
         pending: false,
       };
+    } else if (
+      session.messages.length > 0 &&
+      session.messages[session.messages.length - 1].role === "agent"
+    ) {
+      session.messages[session.messages.length - 1].text = replyText;
     } else {
       session.messages.push({
         id: `msg_a_${Date.now()}`,
