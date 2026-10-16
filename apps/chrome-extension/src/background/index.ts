@@ -303,6 +303,12 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   if (request.type === "GET_BRIDGE_STATUS") {
     sendResponse({ connected: nativePort.isConnected() });
   } else if (request.type === "ATTACH_ACTIVE_TAB") {
+    if (request.tabId) {
+      tabManager.attachTab(request.tabId).then((ok) => {
+        sendResponse({ attached: ok, tabId: request.tabId });
+      });
+      return true;
+    }
     chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
       const tab = tabs[0];
       if (tab?.id) {

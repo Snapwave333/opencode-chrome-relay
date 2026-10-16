@@ -106,10 +106,10 @@ function renderTabs(): void {
     const tabEl = document.createElement("div");
     tabEl.className = `session-tab ${session.runId === activeRunId ? "active" : ""}`;
     tabEl.title = `${session.name} (${session.isPinned ? "Pinned" : "Unpinned - deletes on close"})`;
+    tabEl.onclick = () => switchSession(session.runId);
 
     const titleSpan = document.createElement("span");
     titleSpan.textContent = session.name;
-    titleSpan.onclick = () => switchSession(session.runId);
 
     const pinIndicator = document.createElement("span");
     pinIndicator.className = "tab-pin-indicator";
@@ -139,6 +139,14 @@ function renderTabs(): void {
 function switchSession(runId: string): void {
   if (!sessions.has(runId)) return;
   activeRunId = runId;
+  const current = sessions.get(runId);
+  if (current?.tabId && typeof chrome !== "undefined" && chrome.tabs && chrome.tabs.update) {
+    try {
+      chrome.tabs.update(current.tabId, { active: true });
+    } catch {
+      // Tab might have been closed
+    }
+  }
   renderTabs();
   updateActiveSessionDisplay();
 }
