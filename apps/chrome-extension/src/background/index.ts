@@ -32,6 +32,8 @@ if (typeof chrome !== "undefined" && chrome.downloads?.onDeterminingFilename) {
 }
 
 let actionsInFlight = 0;
+const AUTO_DETACH_IDLE_MS = 30000;
+tabManager.setBusyCheck(() => actionsInFlight > 0);
 
 if (typeof chrome !== "undefined" && chrome.debugger?.onEvent) {
   chrome.debugger.onEvent.addListener(async (source, method) => {
@@ -247,6 +249,7 @@ async function handleActionRequest(
     return await executeActionRequest(envelope);
   } finally {
     actionsInFlight--;
+    tabManager.refreshAutoDetach();
   }
 }
 
@@ -514,21 +517,17 @@ async function executeActionRequest(
               ].join(", ");
 
               const found = findAllNodesDeep(doc, (el) => {
-                if (!isVisible(el)) return false;
+                let matchesSelector = false;
                 try {
-                  if (el.matches(dialogSelectors)) return true;
+                  matchesSelector = el.matches(dialogSelectors);
                 } catch {}
                 const rect = el.getBoundingClientRect();
+                if (rect.width <= 1 || rect.height <= 1) return false;
+                if (!matchesSelector && (rect.width <= 260 || rect.height <= 160)) return false;
                 const style = window.getComputedStyle(el);
-                if (
-                  (style.position === "fixed" || style.position === "absolute") &&
-                  rect.width > 260 &&
-                  rect.height > 160 &&
-                  parseInt(style.zIndex || "0", 10) >= 40
-                ) {
-                  return true;
-                }
-                return false;
+                if (style.visibility === "hidden" || style.display === "none" || style.opacity === "0") return false;
+                if (matchesSelector) return true;
+                return (style.position === "fixed" || style.position === "absolute") && parseInt(style.zIndex || "0", 10) >= 40;
               }) as HTMLElement[];
               return found;
             }
@@ -701,14 +700,18 @@ async function executeActionRequest(
 
             // Traverse both document and shadow roots for interactive elements
             const candidates = findAllNodesDeep(document, (el) => {
-              if (!isVisible(el)) return false;
               try {
-                return el.matches(
-                  'button, a, input[type="button"], input[type="submit"], [role="button"], [role="link"], [role="menuitem"], [role="option"], [role="tab"], [role="checkbox"], mat-select, mat-option, summary, label, [onclick], [download]'
-                );
+                if (
+                  !el.matches(
+                    'button, a, input[type="button"], input[type="submit"], [role="button"], [role="link"], [role="menuitem"], [role="option"], [role="tab"], [role="checkbox"], mat-select, mat-option, summary, label, [onclick], [download]'
+                  )
+                ) {
+                  return false;
+                }
               } catch {
                 return false;
               }
+              return isVisible(el);
             }) as HTMLElement[];
 
             let bestEl: HTMLElement | null = null;
@@ -983,7 +986,7 @@ async function executeActionRequest(
         } catch {}
 
         let hasCdp = tabManager.isAttached(tabId);
-        if (!hasCdp) hasCdp = await tabManager.attachTab(tabId);
+        if (!hasCdp) hasCdp = await tabManager.attachTab(tabId, { autoDetachMs: AUTO_DETACH_IDLE_MS });
         if (hasCdp && action.key) {
           await cdp.keypress(tabId, action.key);
         } else {
@@ -1200,7 +1203,7 @@ async function executeActionRequest(
         // Attempt 1: CDP captureScreenshot
         try {
           let hasCdp = tabManager.isAttached(tabId);
-          if (!hasCdp) hasCdp = await tabManager.attachTab(tabId);
+          if (!hasCdp) hasCdp = await tabManager.attachTab(tabId, { autoDetachMs: AUTO_DETACH_IDLE_MS });
           if (hasCdp) {
             base64 = await cdp.captureScreenshot(tabId);
           }
@@ -1241,7 +1244,7 @@ async function executeActionRequest(
       case "browser_pdf": {
         let pdfBase64 = "";
         let hasCdp = tabManager.isAttached(tabId);
-        if (!hasCdp) hasCdp = await tabManager.attachTab(tabId);
+        if (!hasCdp) hasCdp = await tabManager.attachTab(tabId, { autoDetachMs: AUTO_DETACH_IDLE_MS });
         if (hasCdp) {
           try {
             pdfBase64 = await cdp.printToPDF(tabId);
@@ -1302,7 +1305,7 @@ async function executeActionRequest(
           return { success: false, summary: "No file_paths specified", tabId };
         }
         let hasCdp = tabManager.isAttached(tabId);
-        if (!hasCdp) hasCdp = await tabManager.attachTab(tabId);
+        if (!hasCdp) hasCdp = await tabManager.attachTab(tabId, { autoDetachMs: AUTO_DETACH_IDLE_MS });
         const uploadSuccess = hasCdp ? await cdp.setFileInputFiles(tabId, uploadSelector, files) : false;
         outcome = { success: uploadSuccess, verified: uploadSuccess, uploaded_files: files };
         break;
@@ -1356,7 +1359,7 @@ async function executeActionRequest(
         let evaluated = false;
 
         let hasCdp = tabManager.isAttached(tabId);
-        if (!hasCdp) hasCdp = await tabManager.attachTab(tabId);
+        if (!hasCdp) hasCdp = await tabManager.attachTab(tabId, { autoDetachMs: AUTO_DETACH_IDLE_MS });
         if (hasCdp) {
           try {
             evalVal = await cdp.evaluate(tabId, code);
@@ -1609,21 +1612,17 @@ async function observeTab(tabId?: number | null): Promise<TabObservation> {
         }
 
         const activeDialogs = findNodesDeep(document, (el) => {
-          if (!isVisible(el)) return false;
+          let matchesSelector = false;
           try {
-            if (el.matches(dialogSelectors)) return true;
+            matchesSelector = el.matches(dialogSelectors);
           } catch {}
           const rect = el.getBoundingClientRect();
+          if (rect.width <= 1 || rect.height <= 1) return false;
+          if (!matchesSelector && (rect.width <= 260 || rect.height <= 160)) return false;
           const style = window.getComputedStyle(el);
-          if (
-            (style.position === "fixed" || style.position === "absolute") &&
-            rect.width > 260 &&
-            rect.height > 160 &&
-            parseInt(style.zIndex || "0", 10) >= 40
-          ) {
-            return true;
-          }
-          return false;
+          if (style.visibility === "hidden" || style.display === "none" || style.opacity === "0") return false;
+          if (matchesSelector) return true;
+          return (style.position === "fixed" || style.position === "absolute") && parseInt(style.zIndex || "0", 10) >= 40;
         }) as HTMLElement[];
 
         const dialogHeadings = activeDialogs.flatMap((d) =>
@@ -1646,14 +1645,14 @@ async function observeTab(tabId?: number | null): Promise<TabObservation> {
         const dialogElements: Element[] = [];
         for (const d of activeDialogs) {
           dialogElements.push(...findNodesDeep(d, (el) => {
-            if (!isVisible(el)) return false;
-            try { return el.matches(selectorQuery); } catch { return false; }
+            try { if (!el.matches(selectorQuery)) return false; } catch { return false; }
+            return isVisible(el);
           }));
         }
 
         const pageElements = findNodesDeep(document, (el) => {
-          if (!isVisible(el)) return false;
-          try { return el.matches(selectorQuery); } catch { return false; }
+          try { if (!el.matches(selectorQuery)) return false; } catch { return false; }
+          return isVisible(el);
         });
 
         // Modal / dialog interactive elements ALWAYS go first!

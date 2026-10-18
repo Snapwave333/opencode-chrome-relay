@@ -265,6 +265,18 @@ OpenCode Chrome Relay is engineered from the ground up around strict local-first
 2. **Origin Fencing:** Explicitly refuses attachment to `chrome://`, `chrome-extension://`, and protected internal browser spaces.
 3. **Sensitive Data Protection:** The extension never inspects or exports stored passwords, passkeys, credit cards, or OS credentials. Authentication challenges (2FA, CAPTCHA) are delegated to the user.
 4. **Zero Cloud Brokerage:** All broker IPC occurs strictly over loopback (`127.0.0.1` / named pipes) authenticated via local tokens. No third-party relays or telemetry servers.
+5. **Browser Origin Checks:** The broker rejects WebSocket upgrades from web page origins, so a site you visit cannot drive the relay. Only the extension and local tools may connect.
+6. **Broker-Side Policy:** Forbidden targets (`javascript:`, `file:`, `chrome:` and similar) are refused, and actions that need approval are never dispatched until approved.
+
+### 🔑 Enabling Token Authentication
+
+Set the same `RELAY_AUTH_TOKEN` for the broker, native host, CLI and agent gateway. For the extension, store the token once from its service worker console:
+
+```js
+chrome.storage.local.set({ relayAuthToken: "local-dev-token" })
+```
+
+Unauthenticated sockets receive no events and are disconnected after 10 seconds.
 
 ---
 
@@ -273,7 +285,10 @@ OpenCode Chrome Relay is engineered from the ground up around strict local-first
 The test suite covers unit logic, security fences, protocol contracts, and end-to-end execution:
 
 ```powershell
-# Run Vitest test suite (12 test suites, 43+ tests)
+# Build the broker first so the live broker suite runs instead of skipping
+cargo build -p relay-broker
+
+# Run Vitest test suite (13 test suites, 54+ tests)
 npm test
 
 # Run Rust broker & host tests
@@ -281,7 +296,12 @@ cargo test --workspace
 
 # Run Playwright end-to-end tests
 npm run test:e2e
+
+# Without Google Chrome installed, point Playwright at any Chromium build
+PLAYWRIGHT_CHROMIUM_EXECUTABLE=/path/to/chromium npm run test:e2e
 ```
+
+CI runs formatting, clippy, Rust tests, the TypeScript build, typecheck, Vitest and Playwright on every pull request.
 
 ---
 

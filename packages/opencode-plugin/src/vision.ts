@@ -28,28 +28,25 @@ export class VisionTaskExecutor {
   ): Promise<{ result: T; deleted: boolean }> {
     const filename = `opencode_relay_shot_${Date.now()}_${crypto.randomBytes(6).toString("hex")}.png`;
     const tempPath = path.join(os.tmpdir(), filename);
-    let deleted = false;
+    let result: T;
 
     try {
-      // Strip base64 header if present
       const cleanBase64 = imageBase64.replace(/^data:image\/\w+;base64,/, "");
-      const buffer = Buffer.from(cleanBase64, "base64");
-      fs.writeFileSync(tempPath, buffer);
-
-      // Execute vision task using the vision model
-      const result = await taskFn(tempPath, visionModel);
-      return { result, deleted: false };
+      await fs.promises.writeFile(tempPath, Buffer.from(cleanBase64, "base64"));
+      result = await taskFn(tempPath, visionModel);
     } finally {
-      // Ensure screenshot is deleted right after use
-      if (fs.existsSync(tempPath)) {
-        try {
-          fs.unlinkSync(tempPath);
-          deleted = true;
-        } catch (e) {
-          console.error(`Failed to delete temporary screenshot at ${tempPath}:`, e);
-        }
-      } else {
-        deleted = true;
+      await VisionTaskExecutor.removeTemporaryFile(tempPath);
+    }
+
+    return { result, deleted: !fs.existsSync(tempPath) };
+  }
+
+  private static async removeTemporaryFile(tempPath: string): Promise<void> {
+    try {
+      await fs.promises.unlink(tempPath);
+    } catch (e: any) {
+      if (e?.code !== "ENOENT") {
+        console.error(`Failed to delete temporary screenshot at ${tempPath}:`, e);
       }
     }
   }

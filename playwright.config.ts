@@ -2,6 +2,8 @@ import { defineConfig, devices } from "@playwright/test";
 import path from "path";
 
 const extensionPath = path.resolve(__dirname, "apps/chrome-extension");
+const chromiumExecutable = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE;
+const browserChannel = chromiumExecutable ? undefined : "chrome";
 
 export default defineConfig({
   testDir: "./tests/e2e/playwright",
@@ -14,7 +16,7 @@ export default defineConfig({
   reporter: [["list"]],
   use: {
     trace: "on-first-retry",
-    channel: "chrome",
+    channel: browserChannel,
     headless: false,
   },
   projects: [
@@ -22,8 +24,9 @@ export default defineConfig({
       name: "chrome-extension-e2e",
       use: {
         ...devices["Desktop Chrome"],
-        channel: "chrome",
+        channel: browserChannel,
         launchOptions: {
+          executablePath: chromiumExecutable,
           headless: false,
           ignoreDefaultArgs: ["--disable-extensions"],
           args: [

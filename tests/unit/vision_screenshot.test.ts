@@ -31,7 +31,7 @@ describe("Vision Model Tasks & Immediate Screenshot Deletion", () => {
   it("executes vision task with designated vision model and deletes screenshot immediately after use", async () => {
     let capturedTempPath = "";
 
-    const { result } = await VisionTaskExecutor.executeWithTemporaryScreenshot(
+    const { result, deleted } = await VisionTaskExecutor.executeWithTemporaryScreenshot(
       dummy1x1PngBase64,
       "claude-3-5-sonnet",
       async (tempPath, model) => {
@@ -44,6 +44,7 @@ describe("Vision Model Tasks & Immediate Screenshot Deletion", () => {
     );
 
     expect(result).toBe("success");
+    expect(deleted).toBe(true);
     // Verify file is deleted immediately right after use
     expect(capturedTempPath).not.toBe("");
     expect(fs.existsSync(capturedTempPath)).toBe(false);
