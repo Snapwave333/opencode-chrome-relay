@@ -19,18 +19,49 @@ export class InPageDock {
 
     const style = document.createElement("style");
     style.textContent = `
+      @keyframes dockEntrance {
+        0% { opacity: 0; transform: translateY(20px) scale(0.92); }
+        60% { opacity: 1; transform: translateY(-3px) scale(1.02); }
+        100% { opacity: 1; transform: translateY(0) scale(1); }
+      }
+      @keyframes borderGlow {
+        0%, 100% { border-color: rgba(137, 147, 150, 0.28); box-shadow: 0 8px 32px rgba(0, 0, 0, 0.65), 0 0 16px rgba(128, 213, 232, 0.2); }
+        50% { border-color: rgba(128, 213, 232, 0.55); box-shadow: 0 8px 32px rgba(0, 0, 0, 0.75), 0 0 24px rgba(128, 213, 232, 0.45); }
+      }
+      @keyframes beaconPulse {
+        0% { transform: scale(0.95); opacity: 0.9; box-shadow: 0 0 0 0 rgba(124, 217, 146, 0.7); }
+        70% { transform: scale(1.1); opacity: 1; box-shadow: 0 0 0 6px rgba(124, 217, 146, 0); }
+        100% { transform: scale(0.95); opacity: 0.9; box-shadow: 0 0 0 0 rgba(124, 217, 146, 0); }
+      }
+      @keyframes iconWiggle {
+        0%, 100% { transform: rotate(0deg); }
+        25% { transform: rotate(-8deg) scale(1.1); }
+        75% { transform: rotate(8deg) scale(1.1); }
+      }
+
       .dock-bar {
         display: flex;
         align-items: center;
         gap: 8px;
-        background: rgba(27, 34, 37, 0.88);
-        backdrop-filter: blur(16px);
-        -webkit-backdrop-filter: blur(16px);
+        background: rgba(27, 34, 37, 0.92);
+        backdrop-filter: blur(20px);
+        -webkit-backdrop-filter: blur(20px);
         border: 1px solid rgba(137, 147, 150, 0.28);
-        padding: 6px 12px;
+        padding: 6px 14px;
         border-radius: 9999px;
         box-shadow: 0 8px 32px rgba(0, 0, 0, 0.65), 0 0 16px rgba(128, 213, 232, 0.2);
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        animation: dockEntrance 0.36s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards, borderGlow 4s infinite ease-in-out;
+        will-change: transform, opacity;
+      }
+      .dock-beacon {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: ${M3_COLORS.success};
+        display: inline-block;
+        margin-right: 2px;
+        animation: beaconPulse 2s infinite ease-in-out;
       }
       .dock-btn {
         background: ${M3_COLORS.surfaceContainerHigh};
@@ -43,18 +74,24 @@ export class InPageDock {
         letter-spacing: 0.3px;
         border-radius: 9999px;
         cursor: pointer;
-        transition: all 0.22s cubic-bezier(0.05, 0.7, 0.1, 1);
+        transition: transform 0.18s cubic-bezier(0.175, 0.885, 0.32, 1.275), background 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
         display: inline-flex;
         align-items: center;
         gap: 5px;
       }
-      .dock-btn:hover {
-        transform: translateY(-1px) scale(1.02);
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+      .dock-btn svg {
+        transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
       }
-      .dock-btn:active,
-      .dismiss-btn:active {
-        transform: scale(0.96);
+      .dock-btn:hover {
+        transform: translateY(-2px) scale(1.03);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5), 0 0 8px rgba(128, 213, 232, 0.25);
+      }
+      .dock-btn:hover svg {
+        animation: iconWiggle 0.4s ease-in-out;
+      }
+      .dock-btn:active {
+        transform: translateY(1px) scale(0.93);
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
       }
       .dock-btn:focus-visible,
       .dismiss-btn:focus-visible {
@@ -67,7 +104,8 @@ export class InPageDock {
         background: rgba(255, 183, 77, 0.12);
       }
       .btn-pause:hover {
-        background: rgba(255, 183, 77, 0.24);
+        background: rgba(255, 183, 77, 0.26);
+        border-color: rgba(255, 183, 77, 0.7);
       }
       .btn-stop {
         border-color: rgba(255, 180, 171, 0.4);
@@ -77,6 +115,7 @@ export class InPageDock {
       .btn-stop:hover {
         background: ${M3_COLORS.errorContainer};
         color: #ffffff;
+        border-color: ${M3_COLORS.error};
       }
       .btn-steer {
         border: none;
@@ -86,6 +125,7 @@ export class InPageDock {
       .btn-steer:hover {
         background: ${M3_COLORS.tertiary};
         color: ${M3_COLORS.onTertiary};
+        box-shadow: 0 0 12px rgba(255, 176, 202, 0.5);
       }
       .dismiss-btn {
         background: none;
@@ -99,11 +139,15 @@ export class InPageDock {
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        transition: all 0.15s ease;
+        transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1), background 0.15s ease, color 0.15s ease;
       }
       .dismiss-btn:hover {
-        background: rgba(137, 147, 150, 0.2);
+        background: rgba(137, 147, 150, 0.25);
         color: ${M3_COLORS.onSurface};
+        transform: rotate(90deg) scale(1.12);
+      }
+      .dismiss-btn:active {
+        transform: rotate(90deg) scale(0.9);
       }
       @media (max-width: 520px) {
         .dock-bar {
@@ -115,9 +159,12 @@ export class InPageDock {
         }
       }
       @media (prefers-reduced-motion: reduce) {
+        .dock-bar,
         .dock-btn,
-        .dismiss-btn {
-          transition-duration: 0.01ms;
+        .dismiss-btn,
+        .dock-beacon {
+          animation: none !important;
+          transition-duration: 0.01ms !important;
         }
       }
     `;
@@ -126,6 +173,10 @@ export class InPageDock {
     dock.className = "dock-bar";
     dock.role = "toolbar";
     dock.setAttribute("aria-label", "Relay execution controls");
+
+    const beacon = document.createElement("span");
+    beacon.className = "dock-beacon";
+    beacon.title = "Relay Agent Active";
 
     const btnPause = document.createElement("button");
     btnPause.className = "dock-btn btn-pause";
@@ -152,6 +203,7 @@ export class InPageDock {
     btnDismiss.setAttribute("aria-label", "Dismiss relay controls");
     btnDismiss.onclick = () => this.hide();
 
+    dock.appendChild(beacon);
     dock.appendChild(btnPause);
     dock.appendChild(btnStop);
     dock.appendChild(btnSteer);

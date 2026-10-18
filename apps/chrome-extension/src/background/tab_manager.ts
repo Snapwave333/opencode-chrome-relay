@@ -24,14 +24,36 @@ export class TabManager {
       await chrome.debugger.attach({ tabId }, "1.3");
       this.attachedTabs.add(tabId);
       this.activeTabId = tabId;
+      await this.configureTabDebugger(tabId);
       return true;
     } catch (err: any) {
       if (err?.message?.includes("already attached")) {
         this.attachedTabs.add(tabId);
         this.activeTabId = tabId;
+        await this.configureTabDebugger(tabId);
         return true;
       }
       return false;
+    }
+  }
+
+  private async configureTabDebugger(tabId: number): Promise<void> {
+    try {
+      await chrome.debugger.sendCommand({ tabId }, "Page.enable");
+    } catch {}
+    try {
+      await chrome.debugger.sendCommand({ tabId }, "Browser.setDownloadBehavior", {
+        behavior: "allow",
+        downloadPath: "",
+        eventsEnabled: true,
+      });
+    } catch {
+      try {
+        await chrome.debugger.sendCommand({ tabId }, "Page.setDownloadBehavior", {
+          behavior: "allow",
+          downloadPath: "",
+        });
+      } catch {}
     }
   }
 

@@ -39,9 +39,13 @@ describe("AgentGateway", () => {
     const gateway = new AgentGateway({}, new FakeRelayClient());
     const names = gateway.listTools().map((tool) => tool.name);
 
-    expect(names).toHaveLength(27);
+    expect(names).toHaveLength(31);
     expect(names).toContain("browser_click");
     expect(names).toContain("browser_screenshot");
+    expect(names).toContain("browser_switch_tab");
+    expect(names).toContain("browser_dblclick");
+    expect(names).toContain("browser_rightclick");
+    expect(names).toContain("browser_pdf");
     expect(names).toContain("relay_take_over");
     expect(names).toContain("browser_run_pipeline");
   });
@@ -88,7 +92,7 @@ describe("AgentGateway", () => {
       params: { name: "browser_keypress", arguments: { key: "Enter" } },
     });
 
-    expect(manifest.tools).toHaveLength(27);
+    expect(manifest.tools).toHaveLength(31);
     expect(result.executed).toBe("browser_keypress");
   });
 

@@ -61,6 +61,14 @@ export class CDPController {
     });
   }
 
+  public async mouseMove(tabId: number, x: number, y: number): Promise<void> {
+    await this.sendCommand(tabId, "Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x,
+      y,
+    });
+  }
+
   public async type(tabId: number, text: string): Promise<void> {
     for (const char of text) {
       await this.sendCommand(tabId, "Input.dispatchKeyEvent", {
@@ -85,6 +93,64 @@ export class CDPController {
     });
   }
 
+  public async doubleClick(tabId: number, x: number, y: number): Promise<void> {
+    await this.sendCommand(tabId, "Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x,
+      y,
+    });
+    await this.sendCommand(tabId, "Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x,
+      y,
+      button: "left",
+      clickCount: 1,
+    });
+    await this.sendCommand(tabId, "Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x,
+      y,
+      button: "left",
+      clickCount: 1,
+    });
+    await this.sendCommand(tabId, "Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x,
+      y,
+      button: "left",
+      clickCount: 2,
+    });
+    await this.sendCommand(tabId, "Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x,
+      y,
+      button: "left",
+      clickCount: 2,
+    });
+  }
+
+  public async rightClick(tabId: number, x: number, y: number): Promise<void> {
+    await this.sendCommand(tabId, "Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x,
+      y,
+    });
+    await this.sendCommand(tabId, "Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x,
+      y,
+      button: "right",
+      clickCount: 1,
+    });
+    await this.sendCommand(tabId, "Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x,
+      y,
+      button: "right",
+      clickCount: 1,
+    });
+  }
+
   public async captureScreenshot(tabId: number): Promise<string> {
     try {
       await this.sendCommand(tabId, "Page.enable");
@@ -97,23 +163,51 @@ export class CDPController {
     return fallback?.data || "";
   }
 
+  public async printToPDF(tabId: number, options?: Record<string, any>): Promise<string> {
+    try {
+      await this.sendCommand(tabId, "Page.enable");
+    } catch {}
+    const result = await this.sendCommand(tabId, "Page.printToPDF", options || {
+      printBackground: true,
+      preferCSSPageSize: true,
+    });
+    return result?.data || "";
+  }
+
   public async evaluate(tabId: number, expression: string): Promise<any> {
     const result = await this.sendCommand(tabId, "Runtime.evaluate", {
       expression,
       returnByValue: true,
       awaitPromise: true,
     });
+    if (result?.exceptionDetails) {
+      const desc =
+        result.exceptionDetails.exception?.description ||
+        result.exceptionDetails.text ||
+        "CDP evaluation exception";
+      throw new Error(desc);
+    }
     return result?.result?.value;
   }
 
-  public async setDownloadBehavior(tabId: number, downloadPath: string): Promise<void> {
+  public async setDownloadBehavior(tabId: number, downloadPath?: string): Promise<void> {
+    try {
+      await this.sendCommand(tabId, "Browser.setDownloadBehavior", {
+        behavior: "allow",
+        downloadPath: downloadPath || "",
+        eventsEnabled: true,
+      });
+      return;
+    } catch {
+      // Browser domain may not be supported on page debuggee, fall back to Page domain
+    }
     try {
       await this.sendCommand(tabId, "Page.setDownloadBehavior", {
         behavior: "allow",
-        downloadPath,
+        downloadPath: downloadPath || "",
       });
     } catch {
-      // Page domain may require Browser domain
+      // Ignore if Page domain is also unavailable
     }
   }
 

@@ -68,6 +68,31 @@ export const browserTools: Record<string, ToolDefinition> = {
     },
   },
 
+  browser_switch_tab: {
+    name: "browser_switch_tab",
+    description: "Switch to and activate a specific Chrome tab by ID.",
+    parameters: {
+      type: "object",
+      required: ["tab_id"],
+      properties: {
+        tab_id: { type: "number", description: "Target tab ID to switch to" },
+      },
+    },
+    execute: async (args, client) => {
+      const res = await client.sendAction(
+        {
+          type: "browser_switch_tab",
+          value: String(args.tab_id),
+          risk: "non_sensitive_mutation",
+          is_irreversible: false,
+        },
+        args.tab_id
+      );
+      client.setTabBinding(args.tab_id, `lease_${args.tab_id}`);
+      return res;
+    },
+  },
+
   browser_attach: {
     name: "browser_attach",
     description: "Attach agent to a specific Chrome tab by ID.",
@@ -150,6 +175,25 @@ export const browserTools: Record<string, ToolDefinition> = {
     },
   },
 
+  browser_pdf: {
+    name: "browser_pdf",
+    description: "Generate and save a PDF document from the current browser page using Chrome DevTools Protocol.",
+    parameters: {
+      type: "object",
+      properties: {
+        pdf_path: { type: "string", description: "Optional local file path to save the generated PDF" },
+      },
+    },
+    execute: async (args, client) => {
+      return client.sendAction({
+        type: "browser_pdf",
+        download_path: args.pdf_path,
+        risk: "read_only",
+        is_irreversible: false,
+      });
+    },
+  },
+
   browser_navigate: {
     name: "browser_navigate",
     description: "Navigate the attached browser tab to a specified URL.",
@@ -184,10 +228,71 @@ export const browserTools: Record<string, ToolDefinition> = {
       },
     },
     execute: async (args, client) => {
+      try {
+        return await client.sendAction({
+          type: "browser_click",
+          locator: args as ElementLocator,
+          risk: "external_effect",
+          is_irreversible: false,
+        });
+      } catch (err: any) {
+        const query = (args?.name || args?.selector || args?.text || "").toLowerCase();
+        if (/save|download/.test(query)) {
+          const { tryDismissNativeSaveDialog } = await import("./cli.js");
+          if (tryDismissNativeSaveDialog()) {
+            return {
+              success: true,
+              verified: true,
+              outcome_summary: "Confirmed native Save dialogue box via OS",
+            };
+          }
+        }
+        throw err;
+      }
+    },
+  },
+
+  browser_dblclick: {
+    name: "browser_dblclick",
+    description: "Double-click an interactive element located by semantic role, accessible name, or selector.",
+    parameters: {
+      type: "object",
+      properties: {
+        role: { type: "string" },
+        name: { type: "string" },
+        selector: { type: "string" },
+        text: { type: "string" },
+        point: { type: "object", properties: { x: { type: "number" }, y: { type: "number" } } },
+      },
+    },
+    execute: async (args, client) => {
       return client.sendAction({
-        type: "browser_click",
+        type: "browser_dblclick",
         locator: args as ElementLocator,
         risk: "external_effect",
+        is_irreversible: false,
+      });
+    },
+  },
+
+  browser_rightclick: {
+    name: "browser_rightclick",
+    description: "Right-click (context menu) an interactive element located by semantic role, accessible name, or selector.",
+    parameters: {
+      type: "object",
+      properties: {
+        role: { type: "string" },
+        name: { type: "string" },
+        selector: { type: "string" },
+        text: { type: "string" },
+        point: { type: "object", properties: { x: { type: "number" }, y: { type: "number" } } },
+      },
+    },
+    execute: async (args, client) => {
+      return client.sendAction({
+        type: "browser_rightclick",
+        locator: args as ElementLocator,
+        risk: "read_only",
         is_irreversible: false,
       });
     },

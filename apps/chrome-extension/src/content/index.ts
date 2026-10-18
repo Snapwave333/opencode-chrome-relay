@@ -33,3 +33,10 @@ chrome.runtime.onMessage.addListener((msg) => {
     overlay.clear();
   }
 });
+
+// Listen to visual action events dispatched during DOM action executions
+window.addEventListener("OPENCODE_RELAY_VISUAL_ACTION", (ev: any) => {
+  if (ev?.detail) {
+    overlay.handleVisualAction(ev.detail);
+  }
+});

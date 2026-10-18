@@ -24,3 +24,6 @@ __pycache__/
 *.pyc
 test-results/
 playwright-report/
+scratch/
+/*.png
+

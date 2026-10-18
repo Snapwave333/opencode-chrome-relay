@@ -19,6 +19,31 @@ if (chrome.tabs) {
   chrome.tabs.onActivated?.addListener(() => nativePort.connect());
 }
 
+// Suppress and auto-accept native Save As file dialogs for seamless agent downloads
+if (typeof chrome !== "undefined" && chrome.downloads?.onDeterminingFilename) {
+  chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+    suggest({
+      filename: item.filename,
+      conflictAction: "uniquify",
+    });
+    return true;
+  });
+}
+
+// Auto-handle JavaScript alert/confirm/prompt dialogs via CDP so tab threads don't block
+if (typeof chrome !== "undefined" && chrome.debugger?.onEvent) {
+  chrome.debugger.onEvent.addListener(async (source, method) => {
+    if (method === "Page.javascriptDialogOpening" && source.tabId) {
+      try {
+        await chrome.debugger.sendCommand(source, "Page.handleJavaScriptDialog", {
+          accept: true,
+          promptText: "",
+        });
+      } catch {}
+    }
+  });
+}
+
 // Enable 1-click access to open side panel when extension toolbar icon is clicked
 if (chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
   chrome.sidePanel
@@ -330,6 +355,34 @@ async function handleActionRequest(
     }
   }
 
+  if (action.type === "browser_switch_tab") {
+    const targetTabId = envelope.tab_id || (action.value ? parseInt(action.value, 10) : undefined);
+    if (!targetTabId) {
+      sendActionFailed(envelope, "No target tab ID provided to switch to");
+      return { success: false, summary: "No target tab ID provided" };
+    }
+    try {
+      const tab = await chrome.tabs.update(targetTabId, { active: true });
+      if (tab.windowId) {
+        await chrome.windows.update(tab.windowId, { focused: true });
+      }
+      const summary = `Switched to tab ${targetTabId} (${tab.title || tab.url || "Untitled"})`;
+      sendActionFinished(envelope, {
+        success: true,
+        verified: true,
+        tab_id: targetTabId,
+        url: tab.url,
+        title: tab.title,
+        outcome_summary: summary,
+      });
+      return { success: true, summary, tabId: targetTabId };
+    } catch (err: any) {
+      const msg = err?.message || `Failed to switch to tab ${targetTabId}`;
+      sendActionFailed(envelope, msg);
+      return { success: false, summary: msg };
+    }
+  }
+
   // Handle browser_navigate directly via chrome.tabs.update (or create) so it works from any tab including chrome://newtab/
   if (action.type === "browser_navigate") {
     if (!action.url) {
@@ -381,10 +434,12 @@ async function handleActionRequest(
     let outcome: any = { success: true, verified: true };
 
     switch (action.type) {
-      case "browser_click": {
+      case "browser_click":
+      case "browser_dblclick":
+      case "browser_rightclick": {
         const [clickRes] = await chrome.scripting.executeScript({
           target: { tabId },
-          func: (loc: any) => {
+          func: (loc: any, actionType: string) => {
             function isVisible(el: Element): boolean {
               const rect = el.getBoundingClientRect();
               if (rect.width <= 0 || rect.height <= 0) return false;
@@ -392,35 +447,219 @@ async function handleActionRequest(
               return style.visibility !== "hidden" && style.display !== "none" && style.opacity !== "0";
             }
 
-            function triggerClick(el: HTMLElement): string {
+            function findAllNodesDeep(root: ParentNode, predicate: (el: Element) => boolean): Element[] {
+              const matched: Element[] = [];
+              const search = (node: ParentNode) => {
+                let children: Element[] = [];
+                try {
+                  if (typeof node.querySelectorAll === "function") {
+                    children = Array.from(node.querySelectorAll("*"));
+                  }
+                } catch {}
+                for (const child of children) {
+                  if (predicate(child)) matched.push(child);
+                  if ((child as HTMLElement).shadowRoot) {
+                    search((child as HTMLElement).shadowRoot!);
+                  }
+                }
+              };
+              search(root);
+              return matched;
+            }
+
+            function findActiveDialogs(doc: Document): HTMLElement[] {
+              const dialogSelectors = [
+                '[role="dialog"]',
+                '[role="alertdialog"]',
+                '[aria-modal="true"]',
+                'dialog[open]',
+                'dialog:not([hidden])',
+                '.modal.show',
+                '.modal:not([style*="display: none"])',
+                '[data-modal="true"]',
+                '[data-state="open"]',
+                '[data-radix-portal]',
+                '[class*="modal" i]',
+                '[class*="dialog" i]',
+                '[class*="download-modal" i]',
+                '[class*="download-dialog" i]',
+                '[class*="download-drawer" i]',
+                '[id*="download-modal" i]',
+                '[id*="download-dialog" i]',
+                '[id*="downloadModal" i]',
+              ].join(", ");
+
+              const found = findAllNodesDeep(doc, (el) => {
+                if (!isVisible(el)) return false;
+                try {
+                  if (el.matches(dialogSelectors)) return true;
+                } catch {}
+                const rect = el.getBoundingClientRect();
+                const style = window.getComputedStyle(el);
+                if (
+                  (style.position === "fixed" || style.position === "absolute") &&
+                  rect.width > 260 &&
+                  rect.height > 160 &&
+                  parseInt(style.zIndex || "0", 10) >= 40
+                ) {
+                  return true;
+                }
+                return false;
+              }) as HTMLElement[];
+              return found;
+            }
+
+            function triggerClick(el: HTMLElement): { ok: boolean; summary: string; cx: number; cy: number } {
               el.scrollIntoView({ block: "center", inline: "center" });
               const rect = el.getBoundingClientRect();
               const cx = rect.left + rect.width / 2;
               const cy = rect.top + rect.height / 2;
-              const opts = { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy };
-              el.dispatchEvent(new PointerEvent("pointerdown", opts));
-              el.dispatchEvent(new MouseEvent("mousedown", opts));
-              el.dispatchEvent(new PointerEvent("pointerup", opts));
-              el.dispatchEvent(new MouseEvent("mouseup", opts));
-              el.click();
               const label =
                 el.getAttribute("aria-label") ||
                 (el as HTMLInputElement).value ||
                 (el.textContent || "").trim().slice(0, 60) ||
                 el.tagName.toLowerCase();
-              return `Clicked "${label}"`;
+
+              const visualType =
+                actionType === "browser_dblclick" ? "dblclick" : actionType === "browser_rightclick" ? "contextmenu" : "click";
+              try {
+                window.dispatchEvent(
+                  new CustomEvent("OPENCODE_RELAY_VISUAL_ACTION", {
+                    detail: {
+                      type: visualType,
+                      x: cx,
+                      y: cy,
+                      rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+                      label,
+                    },
+                  })
+                );
+              } catch {}
+
+              const isRight = actionType === "browser_rightclick";
+              const opts = { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, button: isRight ? 2 : 0 };
+              el.dispatchEvent(new PointerEvent("pointerdown", opts));
+              el.dispatchEvent(new MouseEvent("mousedown", opts));
+              el.dispatchEvent(new PointerEvent("pointerup", opts));
+              el.dispatchEvent(new MouseEvent("mouseup", opts));
+              if (isRight) {
+                el.dispatchEvent(new MouseEvent("contextmenu", opts));
+                return { ok: true, summary: `Right-clicked "${label}"`, cx, cy };
+              } else if (actionType === "browser_dblclick") {
+                el.dispatchEvent(new MouseEvent("click", opts));
+                el.dispatchEvent(new PointerEvent("pointerdown", opts));
+                el.dispatchEvent(new MouseEvent("mousedown", opts));
+                el.dispatchEvent(new PointerEvent("pointerup", opts));
+                el.dispatchEvent(new MouseEvent("mouseup", opts));
+                el.dispatchEvent(new MouseEvent("click", opts));
+                el.dispatchEvent(new MouseEvent("dblclick", opts));
+                return { ok: true, summary: `Double-clicked "${label}"`, cx, cy };
+              } else {
+                el.click();
+                return { ok: true, summary: `Clicked "${label}"`, cx, cy };
+              }
             }
 
             if (loc?.point) {
               const target = document.elementFromPoint(loc.point.x, loc.point.y) as HTMLElement | null;
-              if (target) return { ok: true, summary: triggerClick(target) };
+              if (target) return triggerClick(target);
+            }
+
+            const activeDialogs = findActiveDialogs(document);
+
+            // 1. Strict Index Resolution (never fall through to fuzzy text matching for index locators)
+            const indexMatch = loc?.selector?.match(/^\[data-relay-index="(\d+)"\]$/);
+            const targetIndex = indexMatch
+              ? parseInt(indexMatch[1], 10)
+              : typeof loc?.index === "number"
+              ? loc.index
+              : null;
+
+            if (targetIndex !== null) {
+              // Try direct attribute first in dialogs, then document
+              for (const d of activeDialogs) {
+                const el = d.querySelector(`[data-relay-index="${targetIndex}"]`) as HTMLElement | null;
+                if (el && isVisible(el)) {
+                  return triggerClick(el);
+                }
+              }
+              const stamped = document.querySelector(`[data-relay-index="${targetIndex}"]`) as HTMLElement | null;
+              if (stamped && isVisible(stamped)) {
+                return triggerClick(stamped);
+              }
+
+              // Stamped attribute missing or stale: reconstruct interactive elements in exact observeTab order
+              const selectorQuery =
+                'button, a[href], input:not([type="hidden"]), select, textarea, [role="button"], [role="menuitem"], [role="option"], [role="tab"], [role="checkbox"], mat-select, mat-option, summary, [tabindex="0"]';
+              const dialogElements: Element[] = [];
+              for (const d of activeDialogs) {
+                dialogElements.push(...Array.from(d.querySelectorAll(selectorQuery)).filter(isVisible));
+              }
+              const pageElements = Array.from(document.querySelectorAll(selectorQuery)).filter(isVisible);
+              const rawEls = Array.from(new Set([...dialogElements, ...pageElements]));
+
+              const validEls: HTMLElement[] = [];
+              const seen = new Set<string>();
+              for (const el of rawEls) {
+                if (validEls.length >= 120) break;
+                const aria = (el.getAttribute("aria-label") || "").trim();
+                const placeholder = (el.getAttribute("placeholder") || "").trim();
+                const title = (el.getAttribute("title") || "").trim();
+                const text = ((el as HTMLElement).innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+                const label = (aria || text || placeholder || title).slice(0, 80);
+                if (!label) continue;
+                const tag = el.tagName.toLowerCase();
+                const dedupeKey = `${tag}:${label}`;
+                if (seen.has(dedupeKey)) continue;
+                seen.add(dedupeKey);
+                validEls.push(el as HTMLElement);
+              }
+
+              if (targetIndex >= 0 && targetIndex < validEls.length) {
+                return triggerClick(validEls[targetIndex]);
+              }
+              return {
+                ok: false,
+                error: `Element index [${targetIndex}] not found on page (found ${validEls.length} interactive elements). Run 'browser-relay snapshot' to view updated elements.`,
+              };
+            }
+
+            // 2. Explicit Text Matching (loc.text)
+            if (loc?.text) {
+              const textQuery = loc.text.trim().toLowerCase();
+              for (const d of activeDialogs) {
+                const dlgCandidates = Array.from(
+                  d.querySelectorAll('button, a, input, [role="button"], [role="link"], [role="menuitem"], [role="option"], [role="tab"], [role="checkbox"], mat-select, mat-option, summary, label, [onclick]')
+                ).filter(isVisible) as HTMLElement[];
+                const match = dlgCandidates.find((el) => {
+                  const t = (el.innerText || el.textContent || el.getAttribute("aria-label") || (el as HTMLInputElement).value || "").replace(/\s+/g, " ").trim().toLowerCase();
+                  return t === textQuery || t.includes(textQuery);
+                });
+                if (match) return triggerClick(match);
+              }
+              const candidates = Array.from(
+                document.querySelectorAll(
+                  'button, a, input, [role="button"], [role="link"], [role="menuitem"], [role="option"], [role="tab"], [role="checkbox"], mat-select, mat-option, summary, label, [onclick]'
+                )
+              ).filter(isVisible) as HTMLElement[];
+              const match = candidates.find((el) => {
+                const t = (el.innerText || el.textContent || el.getAttribute("aria-label") || (el as HTMLInputElement).value || "").replace(/\s+/g, " ").trim().toLowerCase();
+                return t === textQuery || t.includes(textQuery);
+              });
+              if (match) return triggerClick(match);
             }
 
             if (loc?.selector) {
               try {
+                for (const d of activeDialogs) {
+                  const el = d.querySelector(loc.selector) as HTMLElement | null;
+                  if (el && isVisible(el)) {
+                    return triggerClick(el);
+                  }
+                }
                 const el = document.querySelector(loc.selector) as HTMLElement | null;
                 if (el && isVisible(el)) {
-                  return { ok: true, summary: triggerClick(el) };
+                  return triggerClick(el);
                 }
               } catch {
                 // Invalid selector, fall through to name search
@@ -430,20 +669,30 @@ async function handleActionRequest(
             const query = (loc?.name || loc?.selector || "").trim().toLowerCase();
             if (!query) return { ok: false, error: "Empty click locator" };
 
-            const candidates = Array.from(
-              document.querySelectorAll(
-                'button, a, input[type="button"], input[type="submit"], [role="button"], [role="link"], [role="menuitem"], [role="option"], [role="tab"], [role="checkbox"], mat-select, mat-option, summary, label, [onclick]'
-              )
-            ).filter(isVisible) as HTMLElement[];
+            const isSaveDownloadQuery = /^(save|download|save as|confirm|accept|ok|save to|get|export)$/i.test(query);
+
+            // Traverse both document and shadow roots for interactive elements
+            const candidates = findAllNodesDeep(document, (el) => {
+              if (!isVisible(el)) return false;
+              try {
+                return el.matches(
+                  'button, a, input[type="button"], input[type="submit"], [role="button"], [role="link"], [role="menuitem"], [role="option"], [role="tab"], [role="checkbox"], mat-select, mat-option, summary, label, [onclick], [download]'
+                );
+              } catch {
+                return false;
+              }
+            }) as HTMLElement[];
 
             let bestEl: HTMLElement | null = null;
             let bestScore = -1;
 
             for (const el of candidates) {
+              const inDialog = activeDialogs.some((d) => d.contains(el));
               const aria = (el.getAttribute("aria-label") || "").trim().toLowerCase();
               const title = (el.getAttribute("title") || "").trim().toLowerCase();
               const text = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
               const val = ((el as HTMLInputElement).value || "").trim().toLowerCase();
+              const hasDownloadAttr = el.hasAttribute("download");
 
               let score = -1;
               if (aria === query || text === query || title === query || val === query) {
@@ -452,6 +701,23 @@ async function handleActionRequest(
                 score = 700 - aria.length;
               } else if (text.includes(query)) {
                 score = 500 - Math.min(text.length, 400);
+              } else if (isSaveDownloadQuery) {
+                if (
+                  aria.includes("download") ||
+                  text.includes("download") ||
+                  aria.includes("save") ||
+                  text.includes("save") ||
+                  el.className.toLowerCase().includes("download") ||
+                  el.className.toLowerCase().includes("save") ||
+                  hasDownloadAttr
+                ) {
+                  score = inDialog ? 1800 : 750;
+                }
+              }
+
+              // Active modal/dialog elements get massive priority over background elements
+              if (inDialog && score > 0) {
+                score += 2500;
               }
 
               if (score > bestScore) {
@@ -461,20 +727,37 @@ async function handleActionRequest(
             }
 
             if (bestEl) {
-              return { ok: true, summary: triggerClick(bestEl) };
+              return triggerClick(bestEl);
             }
 
             return { ok: false, error: `Could not find clickable element matching "${loc?.name || loc?.selector}"` };
           },
-          args: [action.locator || {}],
+          args: [action.locator || {}, action.type],
         });
 
-        const result = clickRes?.result as { ok: boolean; summary?: string; error?: string } | undefined;
+        const result = clickRes?.result as { ok: boolean; summary?: string; error?: string; cx?: number; cy?: number } | undefined;
         if (!result?.ok) {
           const errMsg = result?.error || `Element not found: ${JSON.stringify(action.locator)}`;
           sendActionFailed(envelope, errMsg);
           return { success: false, summary: errMsg, tabId };
         }
+
+        // Dispatch hardware-level CDP click/dblclick/rightclick in parallel if attached
+        if (typeof result.cx === "number" && typeof result.cy === "number") {
+          let hasCdp = tabManager.isAttached(tabId);
+          if (hasCdp) {
+            try {
+              if (action.type === "browser_dblclick") {
+                await cdp.doubleClick(tabId, result.cx, result.cy);
+              } else if (action.type === "browser_rightclick") {
+                await cdp.rightClick(tabId, result.cx, result.cy);
+              } else {
+                await cdp.click(tabId, result.cx, result.cy);
+              }
+            } catch {}
+          }
+        }
+
         outcome = { success: true, verified: true, outcome_summary: result.summary };
         break;
       }
@@ -489,14 +772,58 @@ async function handleActionRequest(
             }
 
             let target: HTMLInputElement | HTMLTextAreaElement | null = null;
-            if (loc?.selector) {
+
+            const indexMatch = loc?.selector?.match(/^\[data-relay-index="(\d+)"\]$/);
+            const targetIndex = indexMatch
+              ? parseInt(indexMatch[1], 10)
+              : typeof loc?.index === "number"
+              ? loc.index
+              : null;
+
+            if (targetIndex !== null) {
+              const stamped = document.querySelector(`[data-relay-index="${targetIndex}"]`) as HTMLElement | null;
+              if (stamped) {
+                target = (stamped.matches('input:not([type="hidden"]), textarea, [contenteditable="true"]')
+                  ? stamped
+                  : stamped.querySelector('input:not([type="hidden"]), textarea, [contenteditable="true"]')) as HTMLInputElement | null;
+              }
+              if (!target) {
+                const selectorQuery =
+                  'button, a[href], input:not([type="hidden"]), select, textarea, [role="button"], [role="menuitem"], [role="option"], [role="tab"], [role="checkbox"], mat-select, mat-option, summary, [tabindex="0"]';
+                const rawEls = Array.from(document.querySelectorAll(selectorQuery)).filter(isVisible);
+                const validEls: HTMLElement[] = [];
+                const seen = new Set<string>();
+                for (const el of rawEls) {
+                  if (validEls.length >= 120) break;
+                  const aria = (el.getAttribute("aria-label") || "").trim();
+                  const placeholder = (el.getAttribute("placeholder") || "").trim();
+                  const title = (el.getAttribute("title") || "").trim();
+                  const t = ((el as HTMLElement).innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+                  const label = (aria || t || placeholder || title).slice(0, 80);
+                  if (!label) continue;
+                  const tag = el.tagName.toLowerCase();
+                  const dedupeKey = `${tag}:${label}`;
+                  if (seen.has(dedupeKey)) continue;
+                  seen.add(dedupeKey);
+                  validEls.push(el as HTMLElement);
+                }
+                if (targetIndex >= 0 && targetIndex < validEls.length) {
+                  const el = validEls[targetIndex];
+                  target = (el.matches('input:not([type="hidden"]), textarea, [contenteditable="true"]')
+                    ? el
+                    : el.querySelector('input:not([type="hidden"]), textarea, [contenteditable="true"]')) as HTMLInputElement | null;
+                }
+              }
+            }
+
+            if (!target && loc?.selector && targetIndex === null) {
               try {
                 target = document.querySelector(loc.selector) as HTMLInputElement | null;
               } catch {
                 // ignore invalid selector
               }
             }
-            if (!target && loc?.name) {
+            if (!target && loc?.name && !/^\d+$/.test(loc.name.trim())) {
               const q = loc.name.toLowerCase();
               const inputs = Array.from(
                 document.querySelectorAll('input:not([type="hidden"]), textarea, [contenteditable="true"]')
@@ -511,15 +838,57 @@ async function handleActionRequest(
                 }) || null;
             }
             if (!target) {
-              target = (document.activeElement as HTMLInputElement) || document.querySelector("input, textarea");
+              const active = document.activeElement;
+              if (active && (active.matches?.('input:not([type="hidden"]), textarea, [contenteditable="true"]') || (active as any).isContentEditable)) {
+                target = active as HTMLInputElement;
+              } else {
+                target = document.querySelector('input:not([type="hidden"]):not([disabled]), textarea:not([disabled]), [contenteditable="true"]') as HTMLInputElement | null;
+              }
             }
             if (!target) return { ok: false, error: "No input field found on page" };
 
             target.scrollIntoView({ block: "center", inline: "center" });
             target.focus();
-            target.value = text;
-            target.dispatchEvent(new Event("input", { bubbles: true }));
-            target.dispatchEvent(new Event("change", { bubbles: true }));
+            const rect = target.getBoundingClientRect();
+            const cx = rect.left + rect.width / 2;
+            const cy = rect.top + rect.height / 2;
+            const targetLabel = target.getAttribute("aria-label") || target.placeholder || target.tagName;
+
+            try {
+              window.dispatchEvent(
+                new CustomEvent("OPENCODE_RELAY_VISUAL_ACTION", {
+                  detail: {
+                    type: "type",
+                    x: cx,
+                    y: cy,
+                    rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+                    text,
+                    label: targetLabel,
+                  },
+                })
+              );
+            } catch {}
+
+            if (target.getAttribute("contenteditable") === "true" || (target as any).isContentEditable) {
+              target.innerText = text;
+              target.dispatchEvent(new Event("input", { bubbles: true }));
+              target.dispatchEvent(new Event("change", { bubbles: true }));
+            } else {
+              const proto = target instanceof HTMLTextAreaElement ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+              const nativeValueSetter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+              if (nativeValueSetter) {
+                nativeValueSetter.call(target, text);
+              } else {
+                target.value = text;
+              }
+              const tracker = (target as any)._valueTracker;
+              if (tracker) {
+                tracker.setValue("");
+              }
+              target.dispatchEvent(new Event("input", { bubbles: true }));
+              target.dispatchEvent(new Event("change", { bubbles: true }));
+            }
+
             return { ok: true, summary: `Typed into ${target.getAttribute("aria-label") || target.placeholder || target.tagName}` };
           },
           args: [action.locator || {}, action.text || ""],
@@ -536,10 +905,53 @@ async function handleActionRequest(
       }
 
       case "browser_keypress": {
+        const key = action.key || "Enter";
+        // Dispatch visual feedback to overlay
+        try {
+          await chrome.scripting.executeScript({
+            target: { tabId },
+            func: (k: string) => {
+              const active = (document.activeElement as HTMLElement) || document.body;
+              const rect = active && active !== document.body ? active.getBoundingClientRect() : null;
+              const cx = rect && rect.width > 0 ? rect.left + rect.width / 2 : window.innerWidth / 2;
+              const cy = rect && rect.height > 0 ? rect.top + rect.height / 2 : window.innerHeight / 2;
+              try {
+                window.dispatchEvent(
+                  new CustomEvent("OPENCODE_RELAY_VISUAL_ACTION", {
+                    detail: {
+                      type: "keypress",
+                      x: cx,
+                      y: cy,
+                      key: k,
+                      rect: rect && rect.width > 0 ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : undefined,
+                    },
+                  })
+                );
+              } catch {}
+            },
+            args: [key],
+          });
+        } catch {}
+
         let hasCdp = tabManager.isAttached(tabId);
         if (!hasCdp) hasCdp = await tabManager.attachTab(tabId);
         if (hasCdp && action.key) {
           await cdp.keypress(tabId, action.key);
+        } else {
+          // Synthetic keyboard event fallback
+          try {
+            await chrome.scripting.executeScript({
+              target: { tabId },
+              func: (k: string) => {
+                const target = (document.activeElement as HTMLElement) || document.body;
+                const opts = { key: k, code: k, bubbles: true, cancelable: true };
+                target.dispatchEvent(new KeyboardEvent("keydown", opts));
+                target.dispatchEvent(new KeyboardEvent("keypress", opts));
+                target.dispatchEvent(new KeyboardEvent("keyup", opts));
+              },
+              args: [key],
+            });
+          } catch {}
         }
         outcome = { success: true, verified: true, outcome_summary: `Pressed ${action.key}` };
         break;
@@ -552,10 +964,177 @@ async function handleActionRequest(
         const deltaX = dir === "right" ? amt : dir === "left" ? -amt : 0;
         await chrome.scripting.executeScript({
           target: { tabId },
-          func: (dx: number, dy: number) => window.scrollBy({ left: dx, top: dy, behavior: "smooth" }),
-          args: [deltaX, deltaY],
+          func: (dx: number, dy: number, direction: string, amount: number) => {
+            try {
+              window.dispatchEvent(
+                new CustomEvent("OPENCODE_RELAY_VISUAL_ACTION", {
+                  detail: {
+                    type: "scroll",
+                    x: window.innerWidth / 2,
+                    y: window.innerHeight / 2,
+                    direction,
+                    amount,
+                  },
+                })
+              );
+            } catch {}
+            window.scrollBy({ left: dx, top: dy, behavior: "smooth" });
+          },
+          args: [deltaX, deltaY, dir, amt],
         });
         outcome = { success: true, verified: true, outcome_summary: `Scrolled ${dir} (${amt}px)` };
+        break;
+      }
+
+      case "browser_hover": {
+        const [hoverRes] = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: (loc: any) => {
+            function isVisible(el: Element): boolean {
+              const rect = el.getBoundingClientRect();
+              if (rect.width <= 0 || rect.height <= 0) return false;
+              const style = window.getComputedStyle(el);
+              return style.visibility !== "hidden" && style.display !== "none" && style.opacity !== "0";
+            }
+
+            function triggerHover(el: HTMLElement): { summary: string; cx: number; cy: number } {
+              el.scrollIntoView({ block: "center", inline: "center" });
+              const rect = el.getBoundingClientRect();
+              const cx = rect.left + rect.width / 2;
+              const cy = rect.top + rect.height / 2;
+              const label =
+                el.getAttribute("aria-label") ||
+                (el as HTMLInputElement).value ||
+                (el.textContent || "").trim().slice(0, 60) ||
+                el.tagName.toLowerCase();
+
+              try {
+                window.dispatchEvent(
+                  new CustomEvent("OPENCODE_RELAY_VISUAL_ACTION", {
+                    detail: {
+                      type: "hover",
+                      x: cx,
+                      y: cy,
+                      rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+                      label,
+                    },
+                  })
+                );
+              } catch {}
+
+              const opts = { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy };
+              el.dispatchEvent(new PointerEvent("pointerover", opts));
+              el.dispatchEvent(new MouseEvent("mouseover", opts));
+              el.dispatchEvent(new PointerEvent("pointerenter", opts));
+              el.dispatchEvent(new MouseEvent("mouseenter", opts));
+              el.dispatchEvent(new PointerEvent("pointermove", opts));
+              el.dispatchEvent(new MouseEvent("mousemove", opts));
+              return { summary: `Hovered "${label}"`, cx, cy };
+            }
+
+            if (loc?.point) {
+              const target = document.elementFromPoint(loc.point.x, loc.point.y) as HTMLElement | null;
+              if (target) {
+                const res = triggerHover(target);
+                return { ok: true, summary: res.summary, x: res.cx, y: res.cy };
+              }
+            }
+
+            const activeDialogs = Array.from(
+              document.querySelectorAll(
+                '[role="dialog"], [aria-modal="true"], dialog[open], .modal.show, .modal:not([style*="display: none"]), [data-modal="true"]'
+              )
+            ).filter(isVisible);
+
+            const indexMatch = loc?.selector?.match(/^\[data-relay-index="(\d+)"\]$/);
+            const targetIndex = indexMatch
+              ? parseInt(indexMatch[1], 10)
+              : typeof loc?.index === "number"
+              ? loc.index
+              : null;
+
+            if (targetIndex !== null) {
+              for (const d of activeDialogs) {
+                const el = d.querySelector(`[data-relay-index="${targetIndex}"]`) as HTMLElement | null;
+                if (el && isVisible(el)) {
+                  const res = triggerHover(el);
+                  return { ok: true, summary: res.summary, x: res.cx, y: res.cy };
+                }
+              }
+              const stamped = document.querySelector(`[data-relay-index="${targetIndex}"]`) as HTMLElement | null;
+              if (stamped && isVisible(stamped)) {
+                const res = triggerHover(stamped);
+                return { ok: true, summary: res.summary, x: res.cx, y: res.cy };
+              }
+            }
+
+            if (loc?.selector) {
+              try {
+                for (const d of activeDialogs) {
+                  const el = d.querySelector(loc.selector) as HTMLElement | null;
+                  if (el && isVisible(el)) {
+                    const res = triggerHover(el);
+                    return { ok: true, summary: res.summary, x: res.cx, y: res.cy };
+                  }
+                }
+                const el = document.querySelector(loc.selector) as HTMLElement | null;
+                if (el && isVisible(el)) {
+                  const res = triggerHover(el);
+                  return { ok: true, summary: res.summary, x: res.cx, y: res.cy };
+                }
+              } catch {}
+            }
+
+            const query = (loc?.name || loc?.text || "").trim().toLowerCase();
+            if (query && !/^\d+$/.test(query)) {
+              for (const d of activeDialogs) {
+                const dlgElements = Array.from(
+                  d.querySelectorAll('button, a, input, [role="button"], [role="menuitem"], label, summary, [tabindex="0"]')
+                ).filter(isVisible) as HTMLElement[];
+                const match = dlgElements.find((el) => {
+                  const t = (el.innerText || el.textContent || el.getAttribute("aria-label") || "").trim().toLowerCase();
+                  return t.includes(query);
+                });
+                if (match) {
+                  const res = triggerHover(match);
+                  return { ok: true, summary: res.summary, x: res.cx, y: res.cy };
+                }
+              }
+              const pageCandidates = Array.from(
+                document.querySelectorAll('button, a, input, [role="button"], [role="menuitem"], label, summary, [tabindex="0"]')
+              ).filter(isVisible) as HTMLElement[];
+              const match = pageCandidates.find((el) => {
+                const t = (el.innerText || el.textContent || el.getAttribute("aria-label") || "").trim().toLowerCase();
+                return t.includes(query);
+              });
+              if (match) {
+                const res = triggerHover(match);
+                return { ok: true, summary: res.summary, x: res.cx, y: res.cy };
+              }
+            }
+
+            return { ok: false, error: "Could not find element to hover" };
+          },
+          args: [action.locator || {}],
+        });
+
+        const hoverOut = hoverRes?.result as any;
+        if (!hoverOut?.ok) {
+          const errMsg = hoverOut?.error || "Hover failed";
+          sendActionFailed(envelope, errMsg);
+          return { success: false, summary: errMsg, tabId };
+        }
+
+        if (typeof hoverOut.x === "number" && typeof hoverOut.y === "number") {
+          let hasCdp = tabManager.isAttached(tabId);
+          if (hasCdp) {
+            try {
+              await cdp.mouseMove(tabId, hoverOut.x, hoverOut.y);
+            } catch {}
+          }
+        }
+
+        outcome = { success: true, verified: true, outcome_summary: hoverOut.summary };
         break;
       }
 
@@ -607,6 +1186,30 @@ async function handleActionRequest(
         }
 
         outcome = { success: true, verified: true, screenshot_base64: base64, outcome_summary: "Captured screenshot" };
+        break;
+      }
+
+      case "browser_pdf": {
+        let pdfBase64 = "";
+        let hasCdp = tabManager.isAttached(tabId);
+        if (!hasCdp) hasCdp = await tabManager.attachTab(tabId);
+        if (hasCdp) {
+          try {
+            pdfBase64 = await cdp.printToPDF(tabId);
+          } catch (e: any) {
+            sendActionFailed(envelope, `PDF generation failed: ${e?.message || e}`);
+            return { success: false, summary: `PDF failed: ${e?.message || e}`, tabId };
+          }
+        } else {
+          sendActionFailed(envelope, "CDP debugger attachment required for PDF generation");
+          return { success: false, summary: "CDP not attached", tabId };
+        }
+        outcome = {
+          success: true,
+          verified: true,
+          pdf_base64: pdfBase64,
+          outcome_summary: "Generated PDF document",
+        };
         break;
       }
 
@@ -911,17 +1514,97 @@ async function observeTab(tabId?: number | null): Promise<TabObservation> {
           return "";
         }
 
-        const headings = Array.from(document.querySelectorAll('h1, h2, h3, [role="heading"], [role="dialog"] h2'))
+        const dialogSelectors = [
+          '[role="dialog"]',
+          '[role="alertdialog"]',
+          '[aria-modal="true"]',
+          'dialog[open]',
+          'dialog:not([hidden])',
+          '.modal.show',
+          '.modal:not([style*="display: none"])',
+          '[data-modal="true"]',
+          '[data-state="open"]',
+          '[data-radix-portal]',
+          '[class*="modal" i]',
+          '[class*="dialog" i]',
+          '[class*="download-modal" i]',
+          '[class*="download-dialog" i]',
+          '[class*="download-drawer" i]',
+          '[id*="download-modal" i]',
+          '[id*="download-dialog" i]',
+          '[id*="downloadModal" i]',
+        ].join(", ");
+
+        function findNodesDeep(root: ParentNode, predicate: (el: Element) => boolean): Element[] {
+          const matched: Element[] = [];
+          const search = (node: ParentNode) => {
+            let children: Element[] = [];
+            try {
+              if (typeof node.querySelectorAll === "function") {
+                children = Array.from(node.querySelectorAll("*"));
+              }
+            } catch {}
+            for (const child of children) {
+              if (predicate(child)) matched.push(child);
+              if ((child as HTMLElement).shadowRoot) {
+                search((child as HTMLElement).shadowRoot!);
+              }
+            }
+          };
+          search(root);
+          return matched;
+        }
+
+        const activeDialogs = findNodesDeep(document, (el) => {
+          if (!isVisible(el)) return false;
+          try {
+            if (el.matches(dialogSelectors)) return true;
+          } catch {}
+          const rect = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
+          if (
+            (style.position === "fixed" || style.position === "absolute") &&
+            rect.width > 260 &&
+            rect.height > 160 &&
+            parseInt(style.zIndex || "0", 10) >= 40
+          ) {
+            return true;
+          }
+          return false;
+        }) as HTMLElement[];
+
+        const dialogHeadings = activeDialogs.flatMap((d) =>
+          Array.from(d.querySelectorAll('h1, h2, h3, [role="heading"], [class*="title"], [class*="header"]'))
+            .filter(isVisible)
+            .map((h) => (h.textContent || "").replace(/\s+/g, " ").trim())
+            .filter(Boolean)
+        );
+
+        const pageHeadings = Array.from(document.querySelectorAll('h1, h2, h3, [role="heading"]'))
           .filter(isVisible)
           .map((h) => (h.textContent || "").replace(/\s+/g, " ").trim())
-          .filter(Boolean)
-          .slice(0, 10);
+          .filter(Boolean);
 
-        const rawEls = Array.from(
-          document.querySelectorAll(
-            'button, a[href], input:not([type="hidden"]), select, textarea, [role="button"], [role="menuitem"], [role="option"], [role="tab"], [role="checkbox"], mat-select, mat-option'
-          )
-        ).filter(isVisible);
+        const headings = Array.from(new Set([...dialogHeadings, ...pageHeadings])).slice(0, 15);
+
+        const selectorQuery =
+          'button, a[href], input:not([type="hidden"]), select, textarea, [role="button"], [role="menuitem"], [role="option"], [role="tab"], [role="checkbox"], mat-select, mat-option, summary, [tabindex="0"]';
+
+        const dialogElements: Element[] = [];
+        for (const d of activeDialogs) {
+          dialogElements.push(...findNodesDeep(d, (el) => {
+            if (!isVisible(el)) return false;
+            try { return el.matches(selectorQuery); } catch { return false; }
+          }));
+        }
+
+        const pageElements = findNodesDeep(document, (el) => {
+          if (!isVisible(el)) return false;
+          try { return el.matches(selectorQuery); } catch { return false; }
+        });
+
+        // Modal / dialog interactive elements ALWAYS go first!
+        const rawEls = Array.from(new Set([...dialogElements, ...pageElements]));
 
         const elements: Array<{
           index: number;
@@ -934,7 +1617,7 @@ async function observeTab(tabId?: number | null): Promise<TabObservation> {
         const seenLabels = new Set<string>();
 
         for (const el of rawEls) {
-          if (elements.length >= 55) break;
+          if (elements.length >= 120) break;
           const aria = (el.getAttribute("aria-label") || "").trim();
           const placeholder = (el.getAttribute("placeholder") || "").trim();
           const title = (el.getAttribute("title") || "").trim();
@@ -944,14 +1627,18 @@ async function observeTab(tabId?: number | null): Promise<TabObservation> {
 
           const tag = el.tagName.toLowerCase();
           const role = el.getAttribute("role") || tag;
-          const selector = buildSelector(el);
+          const index = elements.length;
+          try {
+            el.setAttribute("data-relay-index", String(index));
+          } catch {}
+          const selector = buildSelector(el) || `[data-relay-index="${index}"]`;
           const href = tag === "a" ? (el as HTMLAnchorElement).href : undefined;
           const dedupeKey = `${tag}:${label}:${selector}`;
           if (seenLabels.has(dedupeKey)) continue;
           seenLabels.add(dedupeKey);
 
           elements.push({
-            index: elements.length,
+            index,
             tag,
             role,
             label,
@@ -965,6 +1652,8 @@ async function observeTab(tabId?: number | null): Promise<TabObservation> {
           title: document.title,
           headings,
           elements,
+          is_modal_active: activeDialogs.length > 0,
+          modal_title: dialogHeadings[0] || null,
         };
       },
     });

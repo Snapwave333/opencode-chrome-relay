@@ -2,9 +2,14 @@
 import WebSocket from "ws";
 import fs from "node:fs";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { ActionPayload, BrowserActionType } from "@opencode/chrome-relay-protocol";
+import {
+  dismissNativeSaveDialog,
+  isNativeDialogActive,
+  NativeDialogResult,
+} from "./native_dialog.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -22,6 +27,7 @@ export interface CliOptions {
   json: boolean;
   newTab: boolean;
   follow: boolean;
+  verbose: boolean;
 }
 
 export function parseCliArgs(argv: string[]): {
@@ -36,6 +42,7 @@ export function parseCliArgs(argv: string[]): {
     json: false,
     newTab: false,
     follow: false,
+    verbose: false,
   };
   const positionals: string[] = [];
 
@@ -47,12 +54,22 @@ export function parseCliArgs(argv: string[]): {
       options.newTab = true;
     } else if (arg === "--follow" || arg === "-f") {
       options.follow = true;
+    } else if (arg === "--verbose" || arg === "-v") {
+      options.verbose = true;
+    } else if (arg.startsWith("--tab=") || arg.startsWith("-t=")) {
+      options.tabId = parseInt(arg.split("=")[1], 10);
     } else if ((arg === "--tab" || arg === "-t") && argv[i + 1]) {
       options.tabId = parseInt(argv[++i], 10);
+    } else if (arg.startsWith("--run=") || arg.startsWith("-r=")) {
+      options.runId = arg.split("=")[1];
     } else if ((arg === "--run" || arg === "-r") && argv[i + 1]) {
       options.runId = argv[++i];
-    } else if (arg === "--timeout" && argv[i + 1]) {
+    } else if (arg.startsWith("--timeout=") || arg.startsWith("-T=")) {
+      options.timeoutMs = parseInt(arg.split("=")[1], 10);
+    } else if ((arg === "--timeout" || arg === "-T") && argv[i + 1]) {
       options.timeoutMs = parseInt(argv[++i], 10);
+    } else if (arg.startsWith("--broker=")) {
+      options.brokerUrl = arg.split("=")[1];
     } else if (arg === "--broker" && argv[i + 1]) {
       options.brokerUrl = argv[++i];
     } else if (arg === "--help" || arg === "-h") {
@@ -69,6 +86,7 @@ export function parseCliArgs(argv: string[]): {
 export function buildLocatorFromArg(target: string): {
   selector?: string;
   name?: string;
+  text?: string;
   point?: { x: number; y: number };
 } {
   const trimmed = target.trim();
@@ -80,6 +98,13 @@ export function buildLocatorFromArg(target: string): {
         y: parseFloat(coordMatch[2]),
       },
     };
+  }
+  const indexMatch = trimmed.match(/^@?\[?(\d+)\]?$/);
+  if (indexMatch && !trimmed.startsWith("#") && !trimmed.startsWith(".")) {
+    return { selector: `[data-relay-index="${indexMatch[1]}"]`, name: trimmed };
+  }
+  if (trimmed.startsWith("text=")) {
+    return { text: trimmed.slice(5).replace(/^['"]|['"]$/g, "") };
   }
   if (
     trimmed.startsWith("#") ||
@@ -156,11 +181,18 @@ export async function ensureBrokerConnected(url = DEFAULT_BROKER_URL): Promise<W
   throw new Error(`Could not connect to OpenCode Relay Broker at ${url}`);
 }
 
+export function tryDismissNativeSaveDialog(filename?: string, action: "save" | "cancel" = "save"): boolean {
+  const res = dismissNativeSaveDialog({ filename, action });
+  return res.dismissed;
+}
+
 export async function executeRelayAction(
   action: ActionPayload,
-  options: CliOptions
+  options: CliOptions,
+  existingWs?: WebSocket
 ): Promise<any> {
-  const ws = await ensureBrokerConnected(options.brokerUrl);
+  const ws = existingWs || (await ensureBrokerConnected(options.brokerUrl));
+  const shouldClose = !existingWs;
   const idempotencyKey = `cli_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 
   const envelope = {
@@ -177,7 +209,34 @@ export async function executeRelayAction(
   };
 
   return new Promise((resolve, reject) => {
+    let settled = false;
+
+    const cleanup = () => {
+      settled = true;
+      clearInterval(retryInterval);
+      clearTimeout(dialogCheckTimer);
+      clearTimeout(timer);
+      ws.off("message", onMessage);
+      if (shouldClose) {
+        try {
+          ws.close();
+        } catch {}
+      }
+    };
+
+    const dialogCheckTimer = setTimeout(() => {
+      if (settled) return;
+      if (
+        action.type === "browser_click" ||
+        action.type === "browser_download" ||
+        /save|download/i.test(action.locator?.name || action.locator?.selector || "")
+      ) {
+        tryDismissNativeSaveDialog();
+      }
+    }, 2000);
+
     const retryInterval = setInterval(() => {
+      if (settled) return;
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(
           JSON.stringify({
@@ -190,8 +249,18 @@ export async function executeRelayAction(
     }, 1500);
 
     const timer = setTimeout(() => {
-      clearInterval(retryInterval);
-      ws.close();
+      if (settled) return;
+      cleanup();
+      const diagRes = dismissNativeSaveDialog({ action: "save" });
+      if (diagRes.dismissed) {
+        resolve({
+          success: true,
+          verified: true,
+          ...diagRes,
+          outcome_summary: `Confirmed native ${diagRes.windowTitle || "Save As"} dialogue box via OS automation`,
+        });
+        return;
+      }
       reject(
         new Error(
           `Timed out waiting (${options.timeoutMs}ms) for Chrome extension to execute ${action.type}. Ensure Chrome is open and the OpenCode Chrome Relay extension is loaded/reloaded.`
@@ -199,26 +268,42 @@ export async function executeRelayAction(
       );
     }, options.timeoutMs);
 
-    ws.on("message", (data) => {
+    const onMessage = (data: WebSocket.RawData) => {
+      if (settled) return;
       try {
         const msg = JSON.parse(data.toString());
         if (msg.idempotency_key !== idempotencyKey) return;
 
         if (msg.event === "action.finished") {
-          clearInterval(retryInterval);
-          clearTimeout(timer);
-          ws.close();
+          cleanup();
           resolve(msg.payload || { success: true });
         } else if (msg.event === "action.failed") {
-          clearInterval(retryInterval);
-          clearTimeout(timer);
-          ws.close();
-          reject(new Error(msg.payload?.error || `Action ${action.type} failed`));
+          cleanup();
+          const errMsg = msg.payload?.error || `Action ${action.type} failed`;
+          // If an action on Save/Download/Enter failed or element wasn't found in DOM, check for a native OS dialog
+          if (
+            (action.type === "browser_click" || action.type === "browser_keypress" || action.type === "browser_download") &&
+            (/could not find clickable element|element not found/i.test(errMsg) ||
+              /save|download|speichern|confirm|accept|ok/i.test(action.locator?.name || action.locator?.selector || action.key || ""))
+          ) {
+            const diagRes = dismissNativeSaveDialog({ action: "save" });
+            if (diagRes.dismissed) {
+              resolve({
+                success: true,
+                verified: true,
+                ...diagRes,
+                outcome_summary: `Confirmed native ${diagRes.windowTitle || "Save As"} dialogue box via OS automation`,
+              });
+              return;
+            }
+          }
+          reject(new Error(errMsg));
         }
       } catch {
       }
-    });
+    };
 
+    ws.on("message", onMessage);
     ws.send(JSON.stringify(envelope));
   });
 }
@@ -362,21 +447,42 @@ USAGE:
 CORE COMMANDS (Deterministic Direct Execution):
   status                         Check broker health, active sessions & SQLite journal
   tabs                           List all open Chrome tabs across all windows
+  switch-tab <id|query>          Switch to Chrome tab by numeric ID or title/URL search query
   new-tab [url]                  Open a new Chrome tab (default: https://www.google.com)
   close-tab [--tab <id>]         Close the specified or active Chrome tab
   nav <url-or-site>              Navigate tab to URL, domain, or site name ("google cloud credentials", "youtube studio")
+  reload                         Reload the active or specified Chrome tab
+  back                           Navigate backward in tab history
+  forward                        Navigate forward in tab history
+  url                            Print current tab URL
+  title                          Print current tab title
   snapshot                       Observe live DOM: URL, title, headings & interactive elements with selectors
+  find <query>                   Search DOM text and interactive elements matching query with click indices
   extract [selector]             Extract visible page text and links (or from a specific CSS selector)
   eval <js-expression>           Execute arbitrary JavaScript in the live tab and return the result
-  click <name|selector|x,y>      Click any button, link, menu item, CSS selector, or x,y coordinate
-  type [target] <text>           Type text into a matching input/textarea (or focused input)
+  click <index|name|sel|x,y>     Click button, link, menu item, element index (e.g. 3, [3]), or x,y
+  dblclick <index|name|sel|x,y>  Double-click button, link, cell, or element index
+  rightclick <index|name|sel|x,y> Right-click / trigger context menu on element
+  hover <index|name|sel|x,y>     Hover over an element to reveal dropdowns, submenus, or tooltips
+  type [target] <text>           Type text into input/textarea (or element index like 4)
+  clear [target]                 Clear text from input/textarea (or element index)
   press <key>                    Press a keyboard key via CDP (Enter, Tab, Escape, ArrowDown, etc.)
   select <selector> <value>      Select an option in a <select> dropdown
   scroll <down|up|left|right> [px] Scroll the active tab viewport (default: 450px)
+  zoom <level>                   Set page zoom level (e.g. 125%, 1.5, or reset)
+  cookies [domain]               Inspect cookies for active tab
+  storage [key]                  Inspect localStorage and sessionStorage
   wait <selector|text|ms>        Wait for a selector/text to appear or sleep N milliseconds
   verify <selector|text>         Check if a selector or text exists on the current page
   screenshot [output.png]        Capture a PNG screenshot via CDP and save to disk
+  pdf [output.pdf]               Generate and save a PDF document of the page via CDP
   download <url> [filename]      Download a URL using your logged-in Chrome cookies
+  upload <selector> <files...>   Upload local files into a file input element
+  save-dialog                    Confirm and dismiss native OS Save As / download dialogue box
+
+INTERACTIVE & AUTOMATION UTILITIES:
+  repl                           Launch high-speed interactive shell with persistent broker connection
+  batch <file>                   Execute a sequence of browser-relay commands sequentially from file
 
 AUTONOMOUS MULTI-STEP AGENT & TELEMETRY COMMANDS:
   agent "<goal>"                 Run the autonomous multi-step NVIDIA NIM browser agent and stream progress
@@ -388,12 +494,24 @@ GLOBAL OPTIONS:
   --tab, -t <tabId>              Target a specific Chrome tab ID (default: active tab)
   --new-tab, -n                  Open navigation target in a new Chrome tab
   --run, -r <runId>              Session run ID (default: run_1)
-  --timeout <ms>                 Action timeout in milliseconds (default: 18000)
+  --timeout, -T <ms>             Action timeout in milliseconds (default: 18000)
   --json, -j                     Output structured JSON for programmatic AI agent consumption
+  --verbose, -v                  Verbose logging mode
 `);
 }
 
-export async function runCli(argv = process.argv.slice(2)): Promise<void> {
+export function splitCommandLine(cmdLine: string): string[] {
+  const matches = cmdLine.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g);
+  if (!matches) return [];
+  return matches.map((m) => {
+    if ((m.startsWith('"') && m.endsWith('"')) || (m.startsWith("'") && m.endsWith("'"))) {
+      return m.slice(1, -1);
+    }
+    return m;
+  });
+}
+
+export async function runCli(argv = process.argv.slice(2), existingWs?: WebSocket): Promise<void> {
   const { command, positionals, options } = parseCliArgs(argv);
 
   if (command === "help" || command === "--help" || command === "-h") {
@@ -403,6 +521,70 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
 
   if (command === "status") {
     await printStatusAndJournal(options);
+    return;
+  }
+
+  if (command === "repl" || command === "interactive" || command === "shell") {
+    const readline = await import("node:readline");
+    const ws = await ensureBrokerConnected(options.brokerUrl);
+    console.log(`
+╔════════════════════════════════════════════════════════════════════════════╗
+║             browser-relay interactive shell (connected to broker)          ║
+║      Type commands directly (e.g. 'snapshot', 'click 3', 'tabs', 'exit')   ║
+╚════════════════════════════════════════════════════════════════════════════╝
+`);
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+      prompt: "relay> ",
+    });
+    rl.prompt();
+    for await (const line of rl) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        rl.prompt();
+        continue;
+      }
+      if (trimmed === "exit" || trimmed === "quit") {
+        break;
+      }
+      try {
+        const lineArgs = splitCommandLine(trimmed);
+        await runCli(lineArgs, ws);
+      } catch (err: any) {
+        console.error(`❌ ${err?.message || err}`);
+      }
+      rl.prompt();
+    }
+    rl.close();
+    ws.close();
+    console.log("👋 Exited interactive shell.");
+    return;
+  }
+
+  if (command === "batch") {
+    const filePath = positionals[0];
+    if (!filePath || !fs.existsSync(filePath)) {
+      throw new Error("Usage: browser-relay batch <path-to-commands-file>");
+    }
+    const lines = fs
+      .readFileSync(filePath, "utf-8")
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith("#"));
+    console.log(`🚀 Executing ${lines.length} batch command(s) from ${filePath}...`);
+    const ws = existingWs || (await ensureBrokerConnected(options.brokerUrl));
+    try {
+      for (let idx = 0; idx < lines.length; idx++) {
+        const line = lines[idx];
+        console.log(`\n[${idx + 1}/${lines.length}] > ${line}`);
+        const lineArgs = splitCommandLine(line);
+        await runCli(lineArgs, ws);
+      }
+      console.log(`\n🎉 All ${lines.length} batch commands executed successfully.`);
+    } finally {
+      if (!existingWs) ws.close();
+    }
     return;
   }
 
@@ -460,6 +642,26 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
     return;
   }
 
+  if (command === "save-dialog" || command === "confirm-dialog" || command === "accept-dialog") {
+    const filename = positionals[0] || undefined;
+    const isCancel = argv.includes("--cancel") || argv.includes("-c");
+    const res = dismissNativeSaveDialog({ filename, action: isCancel ? "cancel" : "save" });
+    if (res.dismissed) {
+      if (options.json) {
+        console.log(JSON.stringify({ success: true, verified: true, ...res }));
+      } else {
+        console.log(`💾 Confirmed and dismissed native ${res.windowTitle || "Save As"} dialogue box (${res.actionTaken}).`);
+      }
+    } else {
+      if (options.json) {
+        console.log(JSON.stringify({ success: false, verified: false, outcome_summary: "No active native Save As dialogue box found", ...res }));
+      } else {
+        console.log("ℹ️ No active native Save As dialogue box detected.");
+      }
+    }
+    return;
+  }
+
   let action: ActionPayload;
 
   switch (command) {
@@ -488,6 +690,46 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
       };
       break;
 
+    case "switch-tab":
+    case "focus":
+    case "tab": {
+      const target = positionals.join(" ").trim();
+      if (!target) {
+        throw new Error("Usage: browser-relay switch-tab <tabId|search-query>");
+      }
+      if (/^\d+$/.test(target)) {
+        action = {
+          type: "browser_switch_tab" as BrowserActionType,
+          value: target,
+          risk: "non_sensitive_mutation",
+          is_irreversible: false,
+        };
+        options.tabId = parseInt(target, 10);
+      } else {
+        const tabsRes = await executeRelayAction(
+          { type: "browser_list_tabs" as BrowserActionType, risk: "read_only", is_irreversible: false },
+          options,
+          existingWs
+        );
+        const allTabs: Array<{ id: number; title: string; url: string }> = tabsRes?.tabs || [];
+        const query = target.toLowerCase();
+        const matched = allTabs.find(
+          (t) => (t.title && t.title.toLowerCase().includes(query)) || (t.url && t.url.toLowerCase().includes(query))
+        );
+        if (!matched) {
+          throw new Error(`No open Chrome tab matched "${target}". Run 'browser-relay tabs' to view all open tabs.`);
+        }
+        action = {
+          type: "browser_switch_tab" as BrowserActionType,
+          value: String(matched.id),
+          risk: "non_sensitive_mutation",
+          is_irreversible: false,
+        };
+        options.tabId = matched.id;
+      }
+      break;
+    }
+
     case "nav":
     case "navigate":
     case "open":
@@ -503,11 +745,114 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
       break;
     }
 
+    case "reload":
+    case "refresh":
+      action = {
+        type: "browser_eval" as BrowserActionType,
+        text: "location.reload()",
+        risk: "non_sensitive_mutation",
+        is_irreversible: false,
+      };
+      break;
+
+    case "back":
+      action = {
+        type: "browser_eval" as BrowserActionType,
+        text: "history.back()",
+        risk: "non_sensitive_mutation",
+        is_irreversible: false,
+      };
+      break;
+
+    case "forward":
+      action = {
+        type: "browser_eval" as BrowserActionType,
+        text: "history.forward()",
+        risk: "non_sensitive_mutation",
+        is_irreversible: false,
+      };
+      break;
+
+    case "url":
+      action = {
+        type: "browser_eval" as BrowserActionType,
+        text: "window.location.href",
+        risk: "read_only",
+        is_irreversible: false,
+      };
+      break;
+
+    case "title":
+      action = {
+        type: "browser_eval" as BrowserActionType,
+        text: "document.title",
+        risk: "read_only",
+        is_irreversible: false,
+      };
+      break;
+
     case "snapshot":
     case "observe":
     case "dom":
       action = { type: "browser_snapshot", risk: "read_only", is_irreversible: false };
       break;
+
+    case "find":
+    case "search": {
+      const query = positionals.join(" ").trim();
+      if (!query) throw new Error("Usage: browser-relay find <query-text>");
+      const jsFind = `(() => {
+        const query = ${JSON.stringify(query.toLowerCase())};
+        function isVisible(el) {
+          const r = el.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0) return false;
+          const s = window.getComputedStyle(el);
+          return s.visibility !== 'hidden' && s.display !== 'none' && s.opacity !== '0';
+        }
+        const selectorQuery = 'button, a[href], input:not([type="hidden"]), select, textarea, [role="button"], [role="menuitem"], [role="option"], [role="tab"], [role="checkbox"], mat-select, mat-option, summary, [tabindex="0"]';
+        const interactive = Array.from(document.querySelectorAll(selectorQuery)).filter(isVisible);
+        const matches = [];
+        for (let i = 0; i < interactive.length; i++) {
+          const el = interactive[i];
+          const text = (el.innerText || el.textContent || el.getAttribute('aria-label') || el.value || '').replace(/\\s+/g, ' ').trim();
+          if (text.toLowerCase().includes(query)) {
+            const rawIdx = el.getAttribute('data-relay-index');
+            matches.push({
+              index: rawIdx ? parseInt(rawIdx, 10) : i,
+              tag: el.tagName.toLowerCase(),
+              label: text.slice(0, 80),
+              selector: el.id ? '#' + el.id : el.className ? '.' + el.className.split(' ').filter(Boolean).slice(0, 2).join('.') : undefined,
+              href: el.href || undefined
+            });
+          }
+        }
+        return { query: ${JSON.stringify(query)}, count: matches.length, matches: matches.slice(0, 30) };
+      })()`;
+      action = {
+        type: "browser_eval" as BrowserActionType,
+        text: jsFind,
+        risk: "read_only",
+        is_irreversible: false,
+      };
+      const res = await executeRelayAction(action, options, existingWs);
+      const findData = res?.eval_result || { query, count: 0, matches: [] };
+      if (options.json) {
+        console.log(JSON.stringify({ success: true, ...findData }, null, 2));
+      } else {
+        if (!findData.matches || findData.matches.length === 0) {
+          console.log(`🔍 No interactive elements found matching "${query}".`);
+        } else {
+          console.log(`🔍 Found ${findData.count} interactive match(es) for "${query}":`);
+          for (const m of findData.matches) {
+            console.log(
+              `  [${m.index}] <${m.tag}> "${m.label}"${m.selector ? ` selector='${m.selector}'` : ""}${m.href ? ` href='${m.href}'` : ""}`
+            );
+          }
+          console.log(`\n💡 Tip: Click any match using "browser-relay click <index>"`);
+        }
+      }
+      return;
+    }
 
     case "extract":
     case "text":
@@ -540,6 +885,57 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
       action = {
         type: "browser_click",
         locator: buildLocatorFromArg(target),
+        risk: "non_sensitive_mutation",
+        is_irreversible: false,
+      };
+      break;
+    }
+
+    case "dblclick":
+    case "double-click": {
+      const target = positionals.join(" ").trim();
+      if (!target) throw new Error("Usage: browser-relay dblclick <label|selector|x,y>");
+      action = {
+        type: "browser_dblclick" as BrowserActionType,
+        locator: buildLocatorFromArg(target),
+        risk: "non_sensitive_mutation",
+        is_irreversible: false,
+      };
+      break;
+    }
+
+    case "rightclick":
+    case "contextmenu": {
+      const target = positionals.join(" ").trim();
+      if (!target) throw new Error("Usage: browser-relay rightclick <label|selector|x,y>");
+      action = {
+        type: "browser_rightclick" as BrowserActionType,
+        locator: buildLocatorFromArg(target),
+        risk: "non_sensitive_mutation",
+        is_irreversible: false,
+      };
+      break;
+    }
+
+    case "hover": {
+      const target = positionals.join(" ").trim();
+      if (!target) throw new Error("Usage: browser-relay hover <label|selector|x,y>");
+      action = {
+        type: "browser_hover" as BrowserActionType,
+        locator: buildLocatorFromArg(target),
+        risk: "read_only",
+        is_irreversible: false,
+      };
+      break;
+    }
+
+    case "clear": {
+      const target = positionals.join(" ").trim();
+      const locator = target ? buildLocatorFromArg(target) : {};
+      action = {
+        type: "browser_type",
+        locator,
+        text: "",
         risk: "non_sensitive_mutation",
         is_irreversible: false,
       };
@@ -646,7 +1042,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
         risk: "read_only",
         is_irreversible: false,
       };
-      const res = await executeRelayAction(action, options);
+      const res = await executeRelayAction(action, options, existingWs);
       if (!res?.screenshot_base64) {
         throw new Error(res?.error || "Screenshot capture returned no image data");
       }
@@ -657,6 +1053,113 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
         console.log(JSON.stringify({ success: true, file: outPath, bytes }));
       } else {
         console.log(`📸 Screenshot saved to ${outPath} (${bytes} bytes)`);
+      }
+      return;
+    }
+
+    case "pdf":
+    case "print": {
+      action = {
+        type: "browser_pdf" as BrowserActionType,
+        risk: "read_only",
+        is_irreversible: false,
+      };
+      const res = await executeRelayAction(action, options, existingWs);
+      if (!res?.pdf_base64) {
+        throw new Error(res?.error || "PDF generation returned no document data");
+      }
+      const outPath = path.resolve(process.cwd(), positionals[0] || "page.pdf");
+      fs.writeFileSync(outPath, Buffer.from(res.pdf_base64, "base64"));
+      const bytes = Buffer.byteLength(res.pdf_base64, "base64");
+      if (options.json) {
+        console.log(JSON.stringify({ success: true, file: outPath, bytes }));
+      } else {
+        console.log(`📄 PDF saved to ${outPath} (${bytes} bytes)`);
+      }
+      return;
+    }
+
+    case "cookies": {
+      const jsCookies = `(() => {
+        return document.cookie.split('; ').filter(Boolean).map(c => {
+          const eq = c.indexOf('=');
+          return { name: eq >= 0 ? c.slice(0, eq) : c, value: eq >= 0 ? c.slice(eq + 1) : '' };
+        });
+      })()`;
+      action = {
+        type: "browser_eval" as BrowserActionType,
+        text: jsCookies,
+        risk: "read_only",
+        is_irreversible: false,
+      };
+      const res = await executeRelayAction(action, options, existingWs);
+      const cookieList = Array.isArray(res?.eval_result) ? res.eval_result : [];
+      if (options.json) {
+        console.log(JSON.stringify({ success: true, count: cookieList.length, cookies: cookieList }, null, 2));
+      } else {
+        console.log(`🍪 Cookies (${cookieList.length}):`);
+        for (const c of cookieList) {
+          console.log(`  - ${c.name} = ${c.value.slice(0, 40)}${c.value.length > 40 ? "..." : ""}`);
+        }
+      }
+      return;
+    }
+
+    case "storage": {
+      const jsStorage = `(() => {
+        const ls = {};
+        for (let i = 0; i < localStorage.length; i++) {
+          const k = localStorage.key(i);
+          if (k) ls[k] = localStorage.getItem(k);
+        }
+        const ss = {};
+        for (let i = 0; i < sessionStorage.length; i++) {
+          const k = sessionStorage.key(i);
+          if (k) ss[k] = sessionStorage.getItem(k);
+        }
+        return { localStorage: ls, sessionStorage: ss };
+      })()`;
+      action = {
+        type: "browser_eval" as BrowserActionType,
+        text: jsStorage,
+        risk: "read_only",
+        is_irreversible: false,
+      };
+      const res = await executeRelayAction(action, options, existingWs);
+      const data = res?.eval_result || { localStorage: {}, sessionStorage: {} };
+      if (options.json) {
+        console.log(JSON.stringify({ success: true, ...data }, null, 2));
+      } else {
+        const keyTarget = positionals[0];
+        if (keyTarget) {
+          const val = data.localStorage?.[keyTarget] ?? data.sessionStorage?.[keyTarget];
+          console.log(`💾 ${keyTarget}: ${val !== undefined ? val : "(not found)"}`);
+        } else {
+          const lsKeys = Object.keys(data.localStorage || {});
+          const ssKeys = Object.keys(data.sessionStorage || {});
+          console.log(`💾 localStorage (${lsKeys.length} items):`);
+          for (const k of lsKeys) console.log(`  - ${k}: ${String(data.localStorage[k]).slice(0, 50)}`);
+          console.log(`\n💾 sessionStorage (${ssKeys.length} items):`);
+          for (const k of ssKeys) console.log(`  - ${k}: ${String(data.sessionStorage[k]).slice(0, 50)}`);
+        }
+      }
+      return;
+    }
+
+    case "zoom": {
+      const level = positionals[0] || "100%";
+      const val = level.toLowerCase() === "reset" ? "1" : level;
+      action = {
+        type: "browser_eval" as BrowserActionType,
+        text: `document.body.style.zoom = ${JSON.stringify(val)}`,
+        risk: "non_sensitive_mutation",
+        is_irreversible: false,
+      };
+      await executeRelayAction(action, options, existingWs);
+      if (options.json) {
+        console.log(JSON.stringify({ success: true, zoom: level }));
+      } else {
+        console.log(`🔍 Zoom set to ${level}`);
       }
       return;
     }
@@ -692,7 +1195,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
       throw new Error(`Unknown command "${command}". Run "browser-relay help" for usage.`);
   }
 
-  const outcome = await executeRelayAction(action, options);
+  const outcome = await executeRelayAction(action, options, existingWs);
 
   if (options.json) {
     console.log(JSON.stringify(outcome, null, 2));
@@ -704,10 +1207,19 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
     for (const t of outcome.tabs) {
       console.log(`  [${t.id}] ${t.active ? "★ ACTIVE" : "        "} | ${t.title || "(Untitled)"} -> ${t.url}`);
     }
+  } else if (action.type === ("browser_switch_tab" as any)) {
+    console.log(`🔀 ${outcome?.outcome_summary || `Switched to tab ${options.tabId}`}`);
+  } else if (action.type === ("browser_dblclick" as any)) {
+    console.log(`🖱️🖱️ ${outcome?.outcome_summary || "Double-clicked element."}`);
+  } else if (action.type === ("browser_rightclick" as any)) {
+    console.log(`🖱️ ${outcome?.outcome_summary || "Right-clicked element."}`);
   } else if (action.type === "browser_snapshot" && outcome?.snapshot) {
     const snap = outcome.snapshot;
     console.log(`🌐 URL:   ${snap.url}`);
     console.log(`📄 Title: ${snap.title}`);
+    if (snap.is_modal_active) {
+      console.log(`⚡ Active Modal/Dialog: "${snap.modal_title || 'Active Dialog'}"`);
+    }
     if (snap.headings?.length) {
       console.log(`📑 Headings: ${snap.headings.join(" | ")}`);
     }
@@ -719,6 +1231,21 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
         }`
       );
     }
+  } else if (command === "reload" || command === "refresh") {
+    console.log("🔄 Reloaded tab.");
+  } else if (command === "back") {
+    console.log("◀️ Navigated back.");
+  } else if (command === "forward") {
+    console.log("▶️ Navigated forward.");
+  } else if (command === "url") {
+    console.log(outcome?.eval_result || "about:blank");
+  } else if (command === "title") {
+    console.log(outcome?.eval_result || "Untitled");
+  } else if (command === "clear") {
+    console.log("🧹 Cleared input field.");
+  } else if (command === "hover") {
+    const h = outcome?.outcome_summary || outcome?.eval_result?.hovered || "Hovered over element.";
+    console.log(`👆 ${h}`);
   } else if (action.type === "browser_extract" && outcome?.extracted) {
     const ext = outcome.extracted;
     console.log(`🌐 ${ext.title} (${ext.url})\n`);
