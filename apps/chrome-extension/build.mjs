@@ -25,6 +25,13 @@ await esbuild.build({
   outfile: "dist/sidepanel/sidepanel.js",
 });
 
+await esbuild.build({
+  entryPoints: ["src/options.ts"],
+  bundle: true,
+  outfile: "dist/options.js",
+});
+
 fs.mkdirSync("dist/sidepanel", { recursive: true });
 fs.copyFileSync("src/sidepanel/index.html", "dist/sidepanel/index.html");
 fs.copyFileSync("src/sidepanel/sidepanel.css", "dist/sidepanel/sidepanel.css");
+fs.copyFileSync("src/options.html", "dist/options.html");

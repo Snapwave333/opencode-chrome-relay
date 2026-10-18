@@ -1,18 +1,22 @@
 use crate::protocol::ExecutionState;
 use rusqlite::{params, Connection, OptionalExtension, Result};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
-// Helper to handle poisoned mutex gracefully
-fn handle_poison<T>(err: PoisonError<T>) -> rusqlite::Error {
-    rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
-        std::io::ErrorKind::Other,
-        format!("Database connection mutex poisoned: {}", err),
-    )))
+// Helper to recover from poisoned mutex by extracting the guard
+fn lock_or_recover<T>(mutex: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>> {
+    match mutex.lock() {
+        Ok(guard) => Ok(guard),
+        Err(poisoned) => {
+            // Mutex was poisoned but we can still access the data
+            eprintln!("WARNING: Database mutex was poisoned, recovering...");
+            Ok(poisoned.into_inner())
+        }
+    }
 }
 
 #[derive(Clone)]
 pub struct Database {
-    conn: Arc<Mutex<Connection>>,
+    pub(crate) conn: Arc<Mutex<Connection>>,
 }
 
 impl Database {
@@ -35,7 +39,7 @@ impl Database {
     }
 
     fn init_tables(&self) -> Result<()> {
-        let conn = self.conn.lock().map_err(handle_poison)?;
+        let conn = lock_or_recover(&self.conn)?;
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS runs (
@@ -115,7 +119,7 @@ impl Database {
         origin_scope: Option<&str>,
         is_pinned: bool,
     ) -> Result<()> {
-        let conn = self.conn.lock().map_err(handle_poison)?;
+        let conn = lock_or_recover(&self.conn)?;
         let now = chrono::Utc::now().to_rfc3339();
         let state_str = serde_json::to_string(&state).unwrap().replace('\"', "");
 
@@ -146,7 +150,7 @@ impl Database {
     }
 
     pub fn set_run_pinned(&self, run_id: &str, is_pinned: bool) -> Result<()> {
-        let conn = self.conn.lock().map_err(handle_poison)?;
+        let conn = lock_or_recover(&self.conn)?;
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
             "UPDATE runs SET is_pinned = ?1, updated_at = ?2 WHERE run_id = ?3",
@@ -156,7 +160,7 @@ impl Database {
     }
 
     pub fn delete_run(&self, run_id: &str) -> Result<()> {
-        let conn = self.conn.lock().map_err(handle_poison)?;
+        let conn = lock_or_recover(&self.conn)?;
         conn.execute(
             "DELETE FROM action_journal WHERE run_id = ?1",
             params![run_id],
@@ -172,7 +176,7 @@ impl Database {
     }
 
     pub fn cleanup_unpinned_runs(&self) -> Result<usize> {
-        let conn = self.conn.lock().map_err(handle_poison)?;
+        let conn = lock_or_recover(&self.conn)?;
         // Collect unpinned run_ids
         let mut stmt = conn.prepare("SELECT run_id FROM runs WHERE is_pinned = 0")?;
         let run_ids: Vec<String> = stmt
@@ -198,7 +202,7 @@ impl Database {
     }
 
     pub fn update_run_state(&self, run_id: &str, state: ExecutionState, epoch: u64) -> Result<()> {
-        let conn = self.conn.lock().map_err(handle_poison)?;
+        let conn = lock_or_recover(&self.conn)?;
         let now = chrono::Utc::now().to_rfc3339();
         let state_str = serde_json::to_string(&state).unwrap().replace('\"', "");
 
@@ -218,7 +222,7 @@ impl Database {
         action_type: &str,
         payload_json: &str,
     ) -> Result<bool> {
-        let conn = self.conn.lock().map_err(handle_poison)?;
+        let conn = lock_or_recover(&self.conn)?;
         let now = chrono::Utc::now().to_rfc3339();
 
         // Check if already exists
@@ -251,7 +255,7 @@ impl Database {
         verified: bool,
         outcome_json: &str,
     ) -> Result<()> {
-        let conn = self.conn.lock().map_err(handle_poison)?;
+        let conn = lock_or_recover(&self.conn)?;
         let now = chrono::Utc::now().to_rfc3339();
         let status = if success { "finished" } else { "failed" };
 
@@ -274,7 +278,7 @@ impl Database {
         page_title: Option<&str>,
         serialized_state: &str,
     ) -> Result<()> {
-        let conn = self.conn.lock().map_err(handle_poison)?;
+        let conn = lock_or_recover(&self.conn)?;
         let now = chrono::Utc::now().to_rfc3339();
 
         conn.execute(
@@ -298,7 +302,10 @@ impl Database {
         run_id: &str,
         duration_secs: u64,
     ) -> Result<bool> {
-        let conn = self.conn.lock().map_err(handle_poison)?;
+        // First clean up any expired leases (BUG-007 fix)
+        let _ = self.cleanup_expired_leases();
+        
+        let conn = lock_or_recover(&self.conn)?;
         let now = chrono::Utc::now();
         let now_str = now.to_rfc3339();
         let expires_at = (now + chrono::Duration::seconds(duration_secs as i64)).to_rfc3339();
@@ -345,7 +352,7 @@ impl Database {
     }
 
     pub fn cleanup_expired_leases(&self) -> Result<usize> {
-        let conn = self.conn.lock().map_err(handle_poison)?;
+        let conn = lock_or_recover(&self.conn)?;
         let now = chrono::Utc::now().to_rfc3339();
         let deleted = conn.execute(
             "DELETE FROM tab_leases WHERE expires_at < ?1",
@@ -355,7 +362,7 @@ impl Database {
     }
 
     pub fn release_tab_lease(&self, tab_id: i64, run_id: &str) -> Result<()> {
-        let conn = self.conn.lock().map_err(handle_poison)?;
+        let conn = lock_or_recover(&self.conn)?;
         conn.execute(
             "DELETE FROM tab_leases WHERE tab_id = ?1 AND owner_run_id = ?2",
             params![tab_id, run_id],

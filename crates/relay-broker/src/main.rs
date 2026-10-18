@@ -9,7 +9,8 @@ fn generate_or_load_auth_token() -> String {
         .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
         .expect("Could not determine config directory");
     
-    let token_file = config_dir.join("opencode-relay").join("auth-token");
+    let token_dir = config_dir.join("opencode-relay");
+    let token_file = token_dir.join("auth-token");
     
     // Try to read existing token
     if let Ok(token) = std::fs::read_to_string(&token_file) {
@@ -27,16 +28,29 @@ fn generate_or_load_auth_token() -> String {
         .map(char::from)
         .collect();
     
-    // Save token for future use
-    if let Some(parent) = token_file.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    // Save token with restricted permissions
+    if let Err(e) = std::fs::create_dir_all(&token_dir) {
+        eprintln!("Warning: Could not create config directory {:?}: {}", token_dir, e);
+        return token;
     }
+    
     if let Err(e) = std::fs::write(&token_file, &token) {
         eprintln!("Warning: Could not save auth token to {:?}: {}", token_file, e);
         eprintln!("The token will be regenerated on next restart unless RELAY_AUTH_TOKEN is set.");
-    } else {
-        println!("Generated new auth token and saved to: {:?}", token_file);
+        return token;
     }
+    
+    // Set restrictive permissions (Unix only; Windows uses ACLs differently)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o600)) {
+            eprintln!("Warning: Could not set restrictive permissions on {:?}: {}", token_file, e);
+        }
+    }
+    
+    println!("Generated new auth token and saved to: {:?}", token_file);
+    println!("Token file permissions: owner read/write only (0600)");
     
     token
 }

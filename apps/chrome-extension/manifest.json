@@ -23,6 +23,7 @@
   "side_panel": {
     "default_path": "dist/sidepanel/index.html"
   },
+  "options_page": "dist/options.html",
   "content_scripts": [
     {
       "matches": [
