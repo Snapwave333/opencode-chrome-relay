@@ -2,6 +2,7 @@ import { NativeBridgePort } from "./native_port.js";
 import { TabManager } from "./tab_manager.js";
 import { CDPController } from "./cdp_controller.js";
 import { ProtocolEnvelope, ActionPayload } from "@opencode/chrome-relay-protocol";
+import { isRestrictedUrl } from "../shared/constants.js";
 
 declare const __NVIDIA_API_KEY__: string | undefined;
 
@@ -30,10 +31,11 @@ if (typeof chrome !== "undefined" && chrome.downloads?.onDeterminingFilename) {
   });
 }
 
-// Auto-handle JavaScript alert/confirm/prompt dialogs via CDP so tab threads don't block
+let actionsInFlight = 0;
+
 if (typeof chrome !== "undefined" && chrome.debugger?.onEvent) {
   chrome.debugger.onEvent.addListener(async (source, method) => {
-    if (method === "Page.javascriptDialogOpening" && source.tabId) {
+    if (method === "Page.javascriptDialogOpening" && source.tabId && actionsInFlight > 0) {
       try {
         await chrome.debugger.sendCommand(source, "Page.handleJavaScriptDialog", {
           accept: true,
@@ -74,7 +76,7 @@ nativePort.onMessage(async (msg: ProtocolEnvelope) => {
 
   // Broadcast to sidepanel and open extension views
   try {
-    chrome.runtime.sendMessage(msg);
+    chrome.runtime.sendMessage(msg)?.catch(() => {});
   } catch {
     // Side panel might be closed
   }
@@ -228,6 +230,27 @@ async function waitForTabComplete(tabId: number, timeoutMs = 4500): Promise<void
 }
 
 async function handleActionRequest(
+  envelope: ProtocolEnvelope
+): Promise<{ success: boolean; summary: string; tabId?: number }> {
+  const targetUrl = envelope.action?.url;
+  if (
+    targetUrl &&
+    (envelope.action?.type === "browser_navigate" || envelope.action?.type === "browser_new_tab") &&
+    isRestrictedUrl(targetUrl)
+  ) {
+    const msg = `Navigation to restricted URL '${targetUrl}' is not allowed`;
+    sendActionFailed(envelope, msg);
+    return { success: false, summary: msg };
+  }
+  actionsInFlight++;
+  try {
+    return await executeActionRequest(envelope);
+  } finally {
+    actionsInFlight--;
+  }
+}
+
+async function executeActionRequest(
   envelope: ProtocolEnvelope
 ): Promise<{ success: boolean; summary: string; tabId?: number }> {
   const action = envelope.action;
@@ -425,7 +448,7 @@ async function handleActionRequest(
     chrome.tabs.sendMessage(tabId, {
       type: "OVERLAY_ACTION_PREVIEW",
       action,
-    });
+    })?.catch(() => {});
   } catch {
     // Content script may not be loaded yet on some tabs
   }
@@ -437,9 +460,10 @@ async function handleActionRequest(
       case "browser_click":
       case "browser_dblclick":
       case "browser_rightclick": {
+        const useCdpClick = tabManager.isAttached(tabId);
         const [clickRes] = await chrome.scripting.executeScript({
           target: { tabId },
-          func: (loc: any, actionType: string) => {
+          func: (loc: any, actionType: string, useCdp: boolean) => {
             function isVisible(el: Element): boolean {
               const rect = el.getBoundingClientRect();
               if (rect.width <= 0 || rect.height <= 0) return false;
@@ -535,6 +559,10 @@ async function handleActionRequest(
                   })
                 );
               } catch {}
+
+              if (useCdp) {
+                return { ok: true, summary: `Clicked "${label}"`, cx, cy };
+              }
 
               const isRight = actionType === "browser_rightclick";
               const opts = { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, button: isRight ? 2 : 0 };
@@ -732,7 +760,7 @@ async function handleActionRequest(
 
             return { ok: false, error: `Could not find clickable element matching "${loc?.name || loc?.selector}"` };
           },
-          args: [action.locator || {}, action.type],
+          args: [action.locator || {}, action.type, useCdpClick],
         });
 
         const result = clickRes?.result as { ok: boolean; summary?: string; error?: string; cx?: number; cy?: number } | undefined;
@@ -742,19 +770,40 @@ async function handleActionRequest(
           return { success: false, summary: errMsg, tabId };
         }
 
-        // Dispatch hardware-level CDP click/dblclick/rightclick in parallel if attached
-        if (typeof result.cx === "number" && typeof result.cy === "number") {
-          let hasCdp = tabManager.isAttached(tabId);
-          if (hasCdp) {
-            try {
-              if (action.type === "browser_dblclick") {
-                await cdp.doubleClick(tabId, result.cx, result.cy);
-              } else if (action.type === "browser_rightclick") {
-                await cdp.rightClick(tabId, result.cx, result.cy);
-              } else {
-                await cdp.click(tabId, result.cx, result.cy);
-              }
-            } catch {}
+        if (useCdpClick && typeof result.cx === "number" && typeof result.cy === "number") {
+          try {
+            if (action.type === "browser_dblclick") {
+              await cdp.doubleClick(tabId, result.cx, result.cy);
+            } else if (action.type === "browser_rightclick") {
+              await cdp.rightClick(tabId, result.cx, result.cy);
+            } else {
+              await cdp.click(tabId, result.cx, result.cy);
+            }
+          } catch (cdpErr: any) {
+            const [fallbackRes] = await chrome.scripting.executeScript({
+              target: { tabId },
+              func: (x: number, y: number, actionType: string) => {
+                const target = document.elementFromPoint(x, y) as HTMLElement | null;
+                if (!target) return false;
+                const opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: actionType === "browser_rightclick" ? 2 : 0 };
+                if (actionType === "browser_rightclick") {
+                  target.dispatchEvent(new MouseEvent("contextmenu", opts));
+                } else if (actionType === "browser_dblclick") {
+                  target.click();
+                  target.click();
+                  target.dispatchEvent(new MouseEvent("dblclick", opts));
+                } else {
+                  target.click();
+                }
+                return true;
+              },
+              args: [result.cx, result.cy, action.type],
+            });
+            if (!fallbackRes?.result) {
+              const errMsg = `CDP click failed: ${cdpErr?.message || cdpErr}`;
+              sendActionFailed(envelope, errMsg);
+              return { success: false, summary: errMsg, tabId };
+            }
           }
         }
 
@@ -1446,9 +1495,10 @@ async function handleActionRequest(
     }
 
     sendActionFinished(envelope, outcome);
+    const succeeded = outcome?.success !== false;
     return {
-      success: true,
-      summary: outcome?.outcome_summary || `${action.type} succeeded`,
+      success: succeeded,
+      summary: outcome?.outcome_summary || `${action.type} ${succeeded ? "succeeded" : "failed"}`,
       tabId,
     };
   } catch (err: any) {
@@ -1502,7 +1552,10 @@ async function observeTab(tabId?: number | null): Promise<TabObservation> {
             el.getAttribute("data-test-id") ||
             el.getAttribute("data-testid") ||
             el.getAttribute("cfc-test-id");
-          if (testId) return `[data-test-id="${testId}"], [data-testid="${testId}"], [cfc-test-id="${testId}"]`;
+          if (testId) {
+            const safeId = CSS.escape(testId);
+            return `[data-test-id="${safeId}"], [data-testid="${safeId}"], [cfc-test-id="${safeId}"]`;
+          }
           const aria = el.getAttribute("aria-label");
           if (aria && !aria.includes('"') && aria.length < 60) {
             return `${el.tagName.toLowerCase()}[aria-label="${aria}"]`;
@@ -1615,6 +1668,8 @@ async function observeTab(tabId?: number | null): Promise<TabObservation> {
           href?: string;
         }> = [];
         const seenLabels = new Set<string>();
+        document.querySelectorAll("[data-relay-index]").forEach((stale) => stale.removeAttribute("data-relay-index"));
+        rawEls.forEach((candidate) => candidate.removeAttribute("data-relay-index"));
 
         for (const el of rawEls) {
           if (elements.length >= 120) break;
@@ -1627,15 +1682,16 @@ async function observeTab(tabId?: number | null): Promise<TabObservation> {
 
           const tag = el.tagName.toLowerCase();
           const role = el.getAttribute("role") || tag;
+          const baseSelector = buildSelector(el);
+          const dedupeKey = `${tag}:${label}:${baseSelector}`;
+          if (seenLabels.has(dedupeKey)) continue;
+          seenLabels.add(dedupeKey);
           const index = elements.length;
           try {
             el.setAttribute("data-relay-index", String(index));
           } catch {}
-          const selector = buildSelector(el) || `[data-relay-index="${index}"]`;
+          const selector = baseSelector || `[data-relay-index="${index}"]`;
           const href = tag === "a" ? (el as HTMLAnchorElement).href : undefined;
-          const dedupeKey = `${tag}:${label}:${selector}`;
-          if (seenLabels.has(dedupeKey)) continue;
-          seenLabels.add(dedupeKey);
 
           elements.push({
             index,
@@ -1669,9 +1725,9 @@ function sendActionFinished(envelope: ProtocolEnvelope, outcome: any): void {
     try {
       chrome.tabs.sendMessage(tabId, {
         type: "OVERLAY_ACTION_OUTCOME",
-        success: true,
+        success: outcome?.success !== false,
         message: outcome?.outcome_summary || "Action verified",
-      });
+      })?.catch(() => {});
     } catch {
       // Content script may not be present
     }
@@ -1691,7 +1747,7 @@ function sendActionFinished(envelope: ProtocolEnvelope, outcome: any): void {
   };
 
   try {
-    chrome.runtime.sendMessage(finishedEnvelope);
+    chrome.runtime.sendMessage(finishedEnvelope)?.catch(() => {});
   } catch {
     // Side panel might be closed
   }
@@ -1707,7 +1763,7 @@ function sendActionFailed(envelope: ProtocolEnvelope, error: string): void {
         type: "OVERLAY_ACTION_OUTCOME",
         success: false,
         message: error,
-      });
+      })?.catch(() => {});
     } catch {
       // Content script may not be present
     }
@@ -1727,7 +1783,7 @@ function sendActionFailed(envelope: ProtocolEnvelope, error: string): void {
   };
 
   try {
-    chrome.runtime.sendMessage(failedEnvelope);
+    chrome.runtime.sendMessage(failedEnvelope)?.catch(() => {});
   } catch {
     // Side panel might be closed
   }
@@ -1739,7 +1795,20 @@ function sendActionFailed(envelope: ProtocolEnvelope, error: string): void {
 const activeRuns: Map<string, { status: "running" | "paused" | "stopped"; token: number }> = new Map();
 
 // Side panel communication
-chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
+const CONTENT_SCRIPT_CONTROL_COMMANDS = new Set(["pause", "resume", "stop", "steer", "take_over", "return_control"]);
+
+function isAllowedContentScriptRequest(request: any): boolean {
+  if (request?.type === "GET_BRIDGE_STATUS") return true;
+  return (
+    request?.type === "DISPATCH_CONTROL" &&
+    CONTENT_SCRIPT_CONTROL_COMMANDS.has(request.command) &&
+    request.instruction === undefined
+  );
+}
+
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (sender.id !== chrome.runtime.id) return;
+  if (sender.tab && !isAllowedContentScriptRequest(request)) return;
   if (request.type === "GET_BRIDGE_STATUS") {
     sendResponse({ connected: nativePort.isConnected() });
   } else if (request.type === "ATTACH_ACTIVE_TAB") {
@@ -1934,6 +2003,25 @@ function inferActionFromUserIntent(userText: string): ActionPayload | null {
   return null;
 }
 
+const MODEL_ALLOWED_ACTIONS = new Set<string>([
+  "browser_navigate",
+  "browser_new_tab",
+  "browser_switch_tab",
+  "browser_list_tabs",
+  "browser_click",
+  "browser_dblclick",
+  "browser_rightclick",
+  "browser_type",
+  "browser_keypress",
+  "browser_scroll",
+  "browser_hover",
+  "browser_select",
+  "browser_wait",
+  "browser_snapshot",
+  "browser_extract",
+  "browser_verify",
+]);
+
 function extractStepFromModelReply(
   replyText: string,
   userText: string,
@@ -1977,6 +2065,10 @@ function extractStepFromModelReply(
 
   if (action && !action.type.startsWith("browser_")) {
     action = { ...action, type: `browser_${action.type}` as any };
+  }
+
+  if (action && !MODEL_ALLOWED_ACTIONS.has(action.type)) {
+    action = null;
   }
 
   if (
@@ -2225,7 +2317,7 @@ async function dispatchBrowserAction(
     payload: { from_extension: true },
   };
   try {
-    chrome.runtime.sendMessage(actionEnvelope);
+    chrome.runtime.sendMessage(actionEnvelope)?.catch(() => {});
   } catch {
     // Sidepanel closed
   }
@@ -2248,7 +2340,7 @@ function broadcastChatResponse(runId: string, epoch: number, text: string, model
     },
   };
   try {
-    chrome.runtime.sendMessage(envelope);
+    chrome.runtime.sendMessage(envelope)?.catch(() => {});
   } catch {
     // Sidepanel closed
   }

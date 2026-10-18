@@ -1,6 +1,27 @@
 export const NATIVE_HOST_NAME = "com.opencode.chrome_relay";
 export const DEFAULT_BROKER_URL = "ws://127.0.0.1:4098";
 
+const RESTRICTED_URL_SCHEMES = [
+  "chrome:",
+  "chrome-extension:",
+  "chrome-untrusted:",
+  "chrome-search:",
+  "edge:",
+  "devtools:",
+  "javascript:",
+  "file:",
+  "view-source:",
+  "data:",
+  "blob:",
+];
+
+export function isRestrictedUrl(url: string): boolean {
+  const lower = url.trim().toLowerCase();
+  if (lower === "about:blank") return false;
+  if (lower.startsWith("about:")) return true;
+  return RESTRICTED_URL_SCHEMES.some((scheme) => lower.startsWith(scheme));
+}
+
 export const OVERLAY_CONTAINER_ID = "opencode-relay-overlay-root";
 export const DOCK_CONTAINER_ID = "opencode-relay-dock-root";
 

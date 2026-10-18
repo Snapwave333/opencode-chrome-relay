@@ -267,6 +267,13 @@ function renderChatMessages(session: SessionData): void {
   timelineContainer.scrollTop = timelineContainer.scrollHeight;
 }
 
+const MAX_TRACKED_ACTIONS = 200;
+
+function findActiveAction(session: SessionData, idempotencyKey?: string): ActionItem | undefined {
+  const byKey = idempotencyKey ? session.actions.find((a) => a.id === idempotencyKey) : undefined;
+  return byKey ?? [...session.actions].reverse().find((a) => a.status === "active");
+}
+
 function renderActivityFeed(session: SessionData): void {
   activityFeed.innerHTML = "";
   const shouldShowBox = session.actions.length > 0 || session.state !== "READY";
@@ -703,6 +710,9 @@ chrome.runtime.onMessage.addListener((msg) => {
       status: "active",
     };
     session.actions.push(newAction);
+    if (session.actions.length > MAX_TRACKED_ACTIONS) {
+      session.actions.splice(0, session.actions.length - MAX_TRACKED_ACTIONS);
+    }
 
     if (targetRunId === activeRunId) {
       liveDot.style.color = "var(--cyan-accent)";
@@ -710,9 +720,10 @@ chrome.runtime.onMessage.addListener((msg) => {
       renderActivityFeed(session);
     }
   } else if (msg.event === "action.finished") {
-    const lastActive = [...session.actions].reverse().find((a) => a.status === "active");
+    const actionSucceeded = msg.payload?.success !== false;
+    const lastActive = findActiveAction(session, msg.idempotency_key);
     if (lastActive) {
-      lastActive.status = "success";
+      lastActive.status = actionSucceeded ? "success" : "failed";
       lastActive.endTime = Date.now();
       lastActive.durationMs = lastActive.endTime - lastActive.startTime;
       if (msg.payload?.uploaded_files) {
@@ -723,16 +734,16 @@ chrome.runtime.onMessage.addListener((msg) => {
         lastActive.details = msg.payload.outcome_summary;
       }
     }
-    session.verifiedCount++;
+    if (actionSucceeded) session.verifiedCount++;
 
     if (targetRunId === activeRunId) {
-      liveDot.style.color = "var(--green-ok)";
+      liveDot.style.color = actionSucceeded ? "var(--green-ok)" : "var(--red-error)";
       sessionActionStats.innerHTML = `${getMaterial3Svg("bolt", 12)} <span>${session.verifiedCount} verified</span>`;
-      liveActionText.textContent = "Verified";
+      liveActionText.textContent = actionSucceeded ? "Verified" : `Failed: ${msg.payload?.outcome_summary || "Not confirmed"}`;
       renderActivityFeed(session);
     }
   } else if (msg.event === "action.failed") {
-    const lastActive = [...session.actions].reverse().find((a) => a.status === "active");
+    const lastActive = findActiveAction(session, msg.idempotency_key);
     if (lastActive) {
       lastActive.status = "failed";
       lastActive.endTime = Date.now();

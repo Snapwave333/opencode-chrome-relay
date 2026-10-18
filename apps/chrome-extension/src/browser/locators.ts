@@ -65,11 +65,12 @@ export function resolveElementLocator(
 
   // 3. Test ID
   if (locator.testId) {
+    const testIdSelector = `[data-testid="${locator.testId.replace(/["\\]/g, "\\$&")}"]`;
     for (const d of activeDialogs) {
-      const el = d.querySelector?.(`[data-testid="${locator.testId}"]`);
+      const el = d.querySelector?.(testIdSelector);
       if (el) return buildResolvedTarget(el, "testId");
     }
-    const el = rootDocument.querySelector?.(`[data-testid="${locator.testId}"]`);
+    const el = rootDocument.querySelector?.(testIdSelector);
     if (el) return buildResolvedTarget(el, "testId");
   }
 

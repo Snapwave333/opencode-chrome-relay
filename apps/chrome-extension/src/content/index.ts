@@ -17,7 +17,13 @@ function pingBackgroundWorker(): void {
 }
 
 pingBackgroundWorker();
-setInterval(pingBackgroundWorker, 15000);
+const bridgePingTimer = setInterval(() => {
+  if (!chrome.runtime?.id) {
+    clearInterval(bridgePingTimer);
+    return;
+  }
+  if (document.visibilityState === "visible") pingBackgroundWorker();
+}, 15000);
 
 // Listen to messages from background worker
 chrome.runtime.onMessage.addListener((msg) => {

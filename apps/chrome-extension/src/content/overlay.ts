@@ -22,6 +22,8 @@ export class ActionOverlay {
   private floatingToast: HTMLDivElement | null = null;
   private scanLineElement: HTMLDivElement | null = null;
   private clearTimer: any = null;
+  private scrollMarkerTimer: any = null;
+  private toastTimer: any = null;
   private currentCursorX: number = 0;
   private currentCursorY: number = 0;
 
@@ -712,7 +714,7 @@ export class ActionOverlay {
       this.captionElement.style.left = `${Math.max(4, targetBox.x)}px`;
       this.captionElement.style.top = `${Math.max(20, targetBox.y)}px`;
       const targetLabel = action.locator?.name || action.locator?.role || "";
-      this.captionElement.innerHTML = `${getMaterial3Svg(iconName, 14)} <span>${captionText}${targetLabel ? ": " + targetLabel : ""}</span>`;
+      this.setIconLabel(this.captionElement, iconName, 14, `${captionText}${targetLabel ? ": " + targetLabel : ""}`);
 
       // Move animated agent cursor to the target
       this.updateAgentCursor(targetBox.centerX, targetBox.centerY, cursorMode, captionText);
@@ -764,7 +766,7 @@ export class ActionOverlay {
         this.captionElement.style.display = "flex";
         this.captionElement.style.left = `${Math.max(4, rect.left)}px`;
         this.captionElement.style.top = `${Math.max(20, rect.top)}px`;
-        this.captionElement.innerHTML = `${getMaterial3Svg("touch_app", 14)} <span>Clicked: ${label || "Element"}</span>`;
+        this.setIconLabel(this.captionElement, "touch_app", 14, `Clicked: ${label || "Element"}`);
       }
     } else if (type === "type") {
       this.boxElement?.classList.add("type-mode");
@@ -780,7 +782,7 @@ export class ActionOverlay {
         this.captionElement.style.display = "flex";
         this.captionElement.style.left = `${Math.max(4, rect.left)}px`;
         this.captionElement.style.top = `${Math.max(20, rect.top)}px`;
-        this.captionElement.innerHTML = `${getMaterial3Svg("visibility", 14)} <span>Hovering: ${label || "Element"}</span>`;
+        this.setIconLabel(this.captionElement, "visibility", 14, `Hovering: ${label || "Element"}`);
       }
     } else if (type === "keypress") {
       this.updateAgentCursor(x, y, "typing", `Key`);
@@ -844,10 +846,12 @@ export class ActionOverlay {
     this.keypressHudElement.style.display = "flex";
     this.keypressHudElement.style.left = `${Math.max(30, Math.min(window.innerWidth - 180, x))}px`;
     this.keypressHudElement.style.top = `${Math.max(30, y - 48)}px`;
-    this.keypressHudElement.innerHTML = `
-      <span>Key:</span>
-      <span class="keypress-keycap">${keySymbol}</span>
-    `;
+    const keyLabel = document.createElement("span");
+    keyLabel.textContent = "Key:";
+    const keyCap = document.createElement("span");
+    keyCap.className = "keypress-keycap";
+    keyCap.textContent = keySymbol;
+    this.keypressHudElement.replaceChildren(keyLabel, keyCap);
     setTimeout(() => {
       if (this.keypressHudElement) this.keypressHudElement.style.display = "none";
     }, 1500);
@@ -856,10 +860,12 @@ export class ActionOverlay {
   public showDownloadHud(title: string): void {
     if (!this.downloadHudElement) return;
     this.downloadHudElement.style.display = "flex";
-    this.downloadHudElement.innerHTML = `
-      <span class="download-spinner">⬇️</span>
-      <span>${title}</span>
-    `;
+    const spinner = document.createElement("span");
+    spinner.className = "download-spinner";
+    spinner.textContent = "⬇️";
+    const titleLabel = document.createElement("span");
+    titleLabel.textContent = title;
+    this.downloadHudElement.replaceChildren(spinner, titleLabel);
     setTimeout(() => {
       if (this.downloadHudElement) this.downloadHudElement.style.display = "none";
     }, 3200);
@@ -941,13 +947,13 @@ export class ActionOverlay {
     if (success) {
       this.boxElement.classList.add("verified");
       this.captionElement.classList.add("verified");
-      this.captionElement.innerHTML = `${getMaterial3Svg("check_circle", 14)} <span>Verified ${message || ""}</span>`;
+      this.setIconLabel(this.captionElement, "check_circle", 14, `Verified ${message || ""}`);
       badge?.classList.add("verified");
       if (this.cursorBadgeText) this.cursorBadgeText.textContent = "Verified";
     } else {
       this.boxElement.classList.add("failed");
       this.captionElement.classList.add("failed");
-      this.captionElement.innerHTML = `${getMaterial3Svg("cancel", 14)} <span>Failed: ${message || "Action not confirmed"}</span>`;
+      this.setIconLabel(this.captionElement, "cancel", 14, `Failed: ${message || "Action not confirmed"}`);
     }
 
     if (this.clearTimer) clearTimeout(this.clearTimer);
@@ -986,7 +992,7 @@ export class ActionOverlay {
         ? "arrow_forward"
         : "arrow_back";
 
-    this.edgeScrollMarker.innerHTML = `${getMaterial3Svg(arrowIcon, 15)} <span>Scrolling ${direction.toUpperCase()} (${amount}px)</span>`;
+    this.setIconLabel(this.edgeScrollMarker, arrowIcon, 15, `Scrolling ${direction.toUpperCase()} (${amount}px)`);
     this.edgeScrollMarker.style.display = "flex";
 
     if (direction === "down") {
@@ -1005,21 +1011,28 @@ export class ActionOverlay {
       this.edgeScrollMarker.style.transform = "translateX(-50%)";
     }
 
-    if (this.clearTimer) clearTimeout(this.clearTimer);
-    this.clearTimer = setTimeout(() => {
+    if (this.scrollMarkerTimer) clearTimeout(this.scrollMarkerTimer);
+    this.scrollMarkerTimer = setTimeout(() => {
       if (this.edgeScrollMarker) this.edgeScrollMarker.style.display = "none";
     }, 1200);
   }
 
   public showToast(iconName: Material3IconName, text: string, durationMs = 2000): void {
     if (!this.floatingToast) return;
-    this.floatingToast.innerHTML = `${getMaterial3Svg(iconName, 16)} <span>${text}</span>`;
+    this.setIconLabel(this.floatingToast, iconName, 16, text);
     this.floatingToast.style.display = "flex";
 
-    if (this.clearTimer) clearTimeout(this.clearTimer);
-    this.clearTimer = setTimeout(() => {
+    if (this.toastTimer) clearTimeout(this.toastTimer);
+    this.toastTimer = setTimeout(() => {
       if (this.floatingToast) this.floatingToast.style.display = "none";
     }, durationMs);
+  }
+
+  private setIconLabel(el: HTMLElement, icon: Material3IconName, size: number, text: string): void {
+    el.innerHTML = getMaterial3Svg(icon, size);
+    const label = document.createElement("span");
+    label.textContent = text;
+    el.append(" ", label);
   }
 
   public clear(): void {
