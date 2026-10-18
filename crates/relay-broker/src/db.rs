@@ -177,28 +177,27 @@ impl Database {
 
     pub fn cleanup_unpinned_runs(&self) -> Result<usize> {
         let conn = lock_or_recover(&self.conn)?;
-        // Collect unpinned run_ids
-        let mut stmt = conn.prepare("SELECT run_id FROM runs WHERE is_pinned = 0")?;
-        let run_ids: Vec<String> = stmt
-            .query_map([], |row| row.get(0))?
-            .filter_map(|r| r.ok())
-            .collect();
-
-        for run_id in &run_ids {
-            conn.execute(
-                "DELETE FROM action_journal WHERE run_id = ?1",
-                params![run_id],
-            )?;
-            conn.execute("DELETE FROM checkpoints WHERE run_id = ?1", params![run_id])?;
-            conn.execute(
-                "DELETE FROM tab_leases WHERE owner_run_id = ?1",
-                params![run_id],
-            )?;
-            conn.execute("DELETE FROM approvals WHERE run_id = ?1", params![run_id])?;
-            conn.execute("DELETE FROM runs WHERE run_id = ?1", params![run_id])?;
-        }
-
-        Ok(run_ids.len())
+        
+        // BUG-015 fix: Use transaction for atomicity
+        conn.execute("BEGIN IMMEDIATE", [])?;
+        
+        // Get count first
+        let count: usize = conn.query_row(
+            "SELECT COUNT(*) FROM runs WHERE is_pinned = 0",
+            [],
+            |row| row.get(0)
+        )?;
+        
+        // Delete in correct order (foreign key constraints)
+        conn.execute("DELETE FROM action_journal WHERE run_id IN (SELECT run_id FROM runs WHERE is_pinned = 0)", [])?;
+        conn.execute("DELETE FROM checkpoints WHERE run_id IN (SELECT run_id FROM runs WHERE is_pinned = 0)", [])?;
+        conn.execute("DELETE FROM tab_leases WHERE owner_run_id IN (SELECT run_id FROM runs WHERE is_pinned = 0)", [])?;
+        conn.execute("DELETE FROM approvals WHERE run_id IN (SELECT run_id FROM runs WHERE is_pinned = 0)", [])?;
+        conn.execute("DELETE FROM runs WHERE is_pinned = 0", [])?;
+        
+        conn.execute("COMMIT", [])?;
+        
+        Ok(count)
     }
 
     pub fn update_run_state(&self, run_id: &str, state: ExecutionState, epoch: u64) -> Result<()> {

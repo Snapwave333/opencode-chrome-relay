@@ -867,15 +867,29 @@ export class ActionOverlay {
 
   private getKeySymbol(key: string): string {
     const k = key.toLowerCase();
+    // BUG-018 fix: Add missing function keys, navigation keys, and modifiers
     if (k === "enter" || k === "return") return "↵ Enter";
     if (k === "escape" || k === "esc") return "⎋ Esc";
     if (k === "tab") return "⇥ Tab";
     if (k === "backspace") return "⌫ Backspace";
+    if (k === "delete" || k === "del") return "⌦ Delete";
     if (k === "arrowdown" || k === "down") return "↓ Down";
     if (k === "arrowup" || k === "up") return "↑ Up";
     if (k === "arrowleft" || k === "left") return "← Left";
     if (k === "arrowright" || k === "right") return "→ Right";
     if (k === "space") return "␣ Space";
+    if (k === "home") return "⇱ Home";
+    if (k === "end") return "⇲ End";
+    if (k === "pageup") return "⇞ Page Up";
+    if (k === "pagedown") return "⇟ Page Down";
+    if (k === "insert") return "Ins";
+    // Function keys
+    if (k.match(/^f(\d+)$/)) return key.toUpperCase();
+    // Modifiers
+    if (k === "control" || k === "ctrl") return "⌃ Ctrl";
+    if (k === "shift") return "⇧ Shift";
+    if (k === "alt" || k === "option") return "⌥ Alt";
+    if (k === "meta" || k === "command" || k === "cmd") return "⌘ Cmd";
     return key;
   }
 

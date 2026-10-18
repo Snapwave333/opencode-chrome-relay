@@ -24,8 +24,39 @@ export class RelayBrokerClient {
 
   constructor(options: RelayClientOptions = {}) {
     this.brokerUrl = options.brokerUrl || process.env.RELAY_BROKER_URL || "ws://127.0.0.1:4098";
-    this.authToken = options.authToken || process.env.RELAY_AUTH_TOKEN || "";
+    this.authToken = options.authToken || this.loadAuthToken();
     this.runId = options.runId || `run_${Date.now()}`;
+  }
+
+  private loadAuthToken(): string {
+    // Check environment variable first
+    if (process.env.RELAY_AUTH_TOKEN) {
+      return process.env.RELAY_AUTH_TOKEN;
+    }
+
+    // Try to read from config file
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const os = require('os');
+      
+      let configDir: string;
+      if (process.platform === 'win32') {
+        configDir = path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'opencode-relay');
+      } else {
+        const xdgConfig = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
+        configDir = path.join(xdgConfig, 'opencode-relay');
+      }
+      
+      const tokenFile = path.join(configDir, 'auth-token');
+      if (fs.existsSync(tokenFile)) {
+        return fs.readFileSync(tokenFile, 'utf-8').trim();
+      }
+    } catch (err) {
+      // Silently fail - will try to connect without token
+    }
+
+    return "";
   }
 
   public async connect(): Promise<void> {

@@ -96,12 +96,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (stdin_tx, mut stdin_rx) = mpsc::channel::<String>(100);
 
+    // Clone token for the stdio thread
+    let auth_token_for_thread = auth_token.clone();
+    
     // Stdio reading thread with timeout (BUG-013 partial fix)
     std::thread::spawn(move || {
         let mut handle = stdin();
         loop {
             match framing::read_native_message(&mut handle) {
                 Ok(Some(msg)) => {
+                    // Check if this is a token request from extension
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&msg) {
+                        if parsed.get("request").and_then(|r| r.as_str()) == Some("get_auth_token") {
+                            // Respond with token directly to Chrome
+                            let token_response = serde_json::json!({
+                                "auth_token": auth_token_for_thread
+                            });
+                            let mut out = stdout();
+                            let _ = framing::write_native_message(&mut out, &token_response.to_string());
+                            continue; // Don't forward to broker
+                        }
+                    }
+                    
                     if stdin_tx.blocking_send(msg).is_err() {
                         break;
                     }
