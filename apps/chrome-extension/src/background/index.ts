@@ -3,8 +3,6 @@ import { TabManager } from "./tab_manager.js";
 import { CDPController } from "./cdp_controller.js";
 import { ProtocolEnvelope, ActionPayload } from "@opencode/chrome-relay-protocol";
 
-declare const __NVIDIA_API_KEY__: string | undefined;
-
 const nativePort = new NativeBridgePort();
 const tabManager = new TabManager();
 const cdp = new CDPController();
@@ -84,11 +82,16 @@ nativePort.onMessage(async (msg: ProtocolEnvelope) => {
       if (handledIdempotencyKeys.has(msg.idempotency_key)) {
         return;
       }
-      handledIdempotencyKeys.add(msg.idempotency_key);
-      if (handledIdempotencyKeys.size > 500) {
-        const first = handledIdempotencyKeys.values().next().value;
-        if (first) handledIdempotencyKeys.delete(first);
+      
+      // Maintain bounded size by trimming oldest entries (BUG-006 fix)
+      const MAX_CACHE_SIZE = 500;
+      if (handledIdempotencyKeys.size >= MAX_CACHE_SIZE) {
+        // Remove oldest 100 entries to avoid frequent trimming
+        const toDelete = Array.from(handledIdempotencyKeys).slice(0, 100);
+        toDelete.forEach(key => handledIdempotencyKeys.delete(key));
       }
+      
+      handledIdempotencyKeys.add(msg.idempotency_key);
     }
     await handleActionRequest(msg);
   } else if (
@@ -567,7 +570,7 @@ async function handleActionRequest(
 
             const activeDialogs = findActiveDialogs(document);
 
-            // 1. Strict Index Resolution (never fall through to fuzzy text matching for index locators)
+            // BUG-011: Removed data-relay-index stamping - always reconstruct
             const indexMatch = loc?.selector?.match(/^\[data-relay-index="(\d+)"\]$/);
             const targetIndex = indexMatch
               ? parseInt(indexMatch[1], 10)
@@ -576,51 +579,23 @@ async function handleActionRequest(
               : null;
 
             if (targetIndex !== null) {
-              // Try direct attribute first in dialogs, then document
-              for (const d of activeDialogs) {
-                const el = d.querySelector(`[data-relay-index="${targetIndex}"]`) as HTMLElement | null;
-                if (el && isVisible(el)) {
-                  return triggerClick(el);
+              // BUG-011 fix: Try to get element from cache stored by observeTab
+              const ELEMENT_CACHE_KEY = Symbol.for('__opencode_relay_elements__');
+              const cache = (window as any)[ELEMENT_CACHE_KEY];
+              
+              if (cache && cache.elements && Date.now() - cache.timestamp < 10000) {
+                // Cache is fresh (< 10 seconds old), use it
+                const el = cache.elements[targetIndex];
+                if (el && document.contains(el) && isVisible(el)) {
+                  return triggerClick(el as HTMLElement);
                 }
               }
-              const stamped = document.querySelector(`[data-relay-index="${targetIndex}"]`) as HTMLElement | null;
-              if (stamped && isVisible(stamped)) {
-                return triggerClick(stamped);
-              }
-
-              // Stamped attribute missing or stale: reconstruct interactive elements in exact observeTab order
-              const selectorQuery =
-                'button, a[href], input:not([type="hidden"]), select, textarea, [role="button"], [role="menuitem"], [role="option"], [role="tab"], [role="checkbox"], mat-select, mat-option, summary, [tabindex="0"]';
-              const dialogElements: Element[] = [];
-              for (const d of activeDialogs) {
-                dialogElements.push(...Array.from(d.querySelectorAll(selectorQuery)).filter(isVisible));
-              }
-              const pageElements = Array.from(document.querySelectorAll(selectorQuery)).filter(isVisible);
-              const rawEls = Array.from(new Set([...dialogElements, ...pageElements]));
-
-              const validEls: HTMLElement[] = [];
-              const seen = new Set<string>();
-              for (const el of rawEls) {
-                if (validEls.length >= 120) break;
-                const aria = (el.getAttribute("aria-label") || "").trim();
-                const placeholder = (el.getAttribute("placeholder") || "").trim();
-                const title = (el.getAttribute("title") || "").trim();
-                const text = ((el as HTMLElement).innerText || el.textContent || "").replace(/\s+/g, " ").trim();
-                const label = (aria || text || placeholder || title).slice(0, 80);
-                if (!label) continue;
-                const tag = el.tagName.toLowerCase();
-                const dedupeKey = `${tag}:${label}`;
-                if (seen.has(dedupeKey)) continue;
-                seen.add(dedupeKey);
-                validEls.push(el as HTMLElement);
-              }
-
-              if (targetIndex >= 0 && targetIndex < validEls.length) {
-                return triggerClick(validEls[targetIndex]);
-              }
+              
+              // Cache miss or stale - this shouldn't happen in normal flow
+              // Agent should call observe before click, but handle gracefully
               return {
                 ok: false,
-                error: `Element index [${targetIndex}] not found on page (found ${validEls.length} interactive elements). Run 'browser-relay snapshot' to view updated elements.`,
+                error: `Element index ${targetIndex} not found. The page may have changed - please run 'browser_snapshot' again.`,
               };
             }
 
@@ -780,39 +755,25 @@ async function handleActionRequest(
               ? loc.index
               : null;
 
+            // BUG-011 fix: Retrieve element from cache
             if (targetIndex !== null) {
-              const stamped = document.querySelector(`[data-relay-index="${targetIndex}"]`) as HTMLElement | null;
-              if (stamped) {
-                target = (stamped.matches('input:not([type="hidden"]), textarea, [contenteditable="true"]')
-                  ? stamped
-                  : stamped.querySelector('input:not([type="hidden"]), textarea, [contenteditable="true"]')) as HTMLInputElement | null;
-              }
-              if (!target) {
-                const selectorQuery =
-                  'button, a[href], input:not([type="hidden"]), select, textarea, [role="button"], [role="menuitem"], [role="option"], [role="tab"], [role="checkbox"], mat-select, mat-option, summary, [tabindex="0"]';
-                const rawEls = Array.from(document.querySelectorAll(selectorQuery)).filter(isVisible);
-                const validEls: HTMLElement[] = [];
-                const seen = new Set<string>();
-                for (const el of rawEls) {
-                  if (validEls.length >= 120) break;
-                  const aria = (el.getAttribute("aria-label") || "").trim();
-                  const placeholder = (el.getAttribute("placeholder") || "").trim();
-                  const title = (el.getAttribute("title") || "").trim();
-                  const t = ((el as HTMLElement).innerText || el.textContent || "").replace(/\s+/g, " ").trim();
-                  const label = (aria || t || placeholder || title).slice(0, 80);
-                  if (!label) continue;
-                  const tag = el.tagName.toLowerCase();
-                  const dedupeKey = `${tag}:${label}`;
-                  if (seen.has(dedupeKey)) continue;
-                  seen.add(dedupeKey);
-                  validEls.push(el as HTMLElement);
-                }
-                if (targetIndex >= 0 && targetIndex < validEls.length) {
-                  const el = validEls[targetIndex];
+              const ELEMENT_CACHE_KEY = Symbol.for('__opencode_relay_elements__');
+              const cache = (window as any)[ELEMENT_CACHE_KEY];
+              
+              if (cache && cache.elements && Date.now() - cache.timestamp < 10000) {
+                const el = cache.elements[targetIndex];
+                if (el && document.contains(el)) {
                   target = (el.matches('input:not([type="hidden"]), textarea, [contenteditable="true"]')
                     ? el
                     : el.querySelector('input:not([type="hidden"]), textarea, [contenteditable="true"]')) as HTMLInputElement | null;
                 }
+              }
+              
+              if (!target) {
+                return {
+                  ok: false,
+                  error: `Element index ${targetIndex} not found. The page may have changed - please run 'browser_snapshot' again.`,
+                };
               }
             }
 
@@ -1053,19 +1014,23 @@ async function handleActionRequest(
               ? loc.index
               : null;
 
+            // BUG-011: Removed data-relay-index stamping - retrieve from cache
             if (targetIndex !== null) {
-              for (const d of activeDialogs) {
-                const el = d.querySelector(`[data-relay-index="${targetIndex}"]`) as HTMLElement | null;
-                if (el && isVisible(el)) {
-                  const res = triggerHover(el);
+              const ELEMENT_CACHE_KEY = Symbol.for('__opencode_relay_elements__');
+              const cache = (window as any)[ELEMENT_CACHE_KEY];
+              
+              if (cache && cache.elements && Date.now() - cache.timestamp < 10000) {
+                const el = cache.elements[targetIndex];
+                if (el && document.contains(el) && isVisible(el)) {
+                  const res = triggerHover(el as HTMLElement);
                   return { ok: true, summary: res.summary, x: res.cx, y: res.cy };
                 }
               }
-              const stamped = document.querySelector(`[data-relay-index="${targetIndex}"]`) as HTMLElement | null;
-              if (stamped && isVisible(stamped)) {
-                const res = triggerHover(stamped);
-                return { ok: true, summary: res.summary, x: res.cx, y: res.cy };
-              }
+              
+              return {
+                ok: false,
+                error: `Element index ${targetIndex} not found. The page may have changed - please run 'browser_snapshot' again.`,
+              };
             }
 
             if (loc?.selector) {
@@ -1616,6 +1581,11 @@ async function observeTab(tabId?: number | null): Promise<TabObservation> {
         }> = [];
         const seenLabels = new Set<string>();
 
+        // BUG-011 fix: Store element references in a way pages can't access
+        // Use a Symbol key on window - pages can't enumerate or access this
+        const ELEMENT_CACHE_KEY = Symbol.for('__opencode_relay_elements__');
+        (window as any)[ELEMENT_CACHE_KEY] = { elements: [], timestamp: Date.now() };
+
         for (const el of rawEls) {
           if (elements.length >= 120) break;
           const aria = (el.getAttribute("aria-label") || "").trim();
@@ -1628,15 +1598,15 @@ async function observeTab(tabId?: number | null): Promise<TabObservation> {
           const tag = el.tagName.toLowerCase();
           const role = el.getAttribute("role") || tag;
           const index = elements.length;
-          try {
-            el.setAttribute("data-relay-index", String(index));
-          } catch {}
-          const selector = buildSelector(el) || `[data-relay-index="${index}"]`;
-          const href = tag === "a" ? (el as HTMLAnchorElement).href : undefined;
+          const selector = buildSelector(el) || "";
           const dedupeKey = `${tag}:${label}:${selector}`;
           if (seenLabels.has(dedupeKey)) continue;
           seenLabels.add(dedupeKey);
 
+          // Store element reference
+          (window as any)[ELEMENT_CACHE_KEY].elements.push(el);
+
+          const href = tag === "a" ? (el as HTMLAnchorElement).href : undefined;
           elements.push({
             index,
             tag,
@@ -1809,9 +1779,8 @@ const ACTIVE_NIM_MODELS = [
 ];
 
 async function getNvidiaApiKey(): Promise<string> {
-  if (typeof __NVIDIA_API_KEY__ !== "undefined" && __NVIDIA_API_KEY__) {
-    return __NVIDIA_API_KEY__;
-  }
+  // BUG-003 fix: API keys must NEVER be embedded in extension code
+  // Users must configure their own key in extension settings
   try {
     const stored = await chrome.storage.local.get("nvidia_api_key");
     if (stored?.nvidia_api_key) return stored.nvidia_api_key;
@@ -2062,7 +2031,7 @@ async function handleUserChat(
       broadcastChatResponse(
         runId,
         epoch,
-        "Pong! Relay agent is online, but NVIDIA_API_KEY is not configured in the build or extension storage.",
+        "Please configure your NVIDIA API key in extension settings to use the built-in chat agent.",
         "local"
       );
       return;

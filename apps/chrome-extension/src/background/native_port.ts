@@ -8,8 +8,10 @@ export class NativeBridgePort {
   private disconnectListeners: (() => void)[] = [];
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private keepAliveInterval: ReturnType<typeof setInterval> | null = null;
+  private authToken: string | null = null;
+  private authTokenRequested = false;
 
-  public connect(): boolean {
+  public async connect(): Promise<boolean> {
     this.startKeepAlive();
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
       return true;
@@ -18,10 +20,22 @@ export class NativeBridgePort {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    
+    // Get auth token before connecting
+    if (!this.authToken && !this.authTokenRequested) {
+      this.authTokenRequested = true;
+      await this.fetchAuthToken();
+    }
+    
     try {
       const ws = new WebSocket(DEFAULT_BROKER_URL);
       this.ws = ws;
       ws.onopen = () => {
+        // Send auth token immediately after connection
+        if (this.authToken) {
+          ws.send(JSON.stringify({ auth_token: this.authToken }));
+        }
+        
         while (this.pendingQueue.length > 0 && ws.readyState === WebSocket.OPEN) {
           const item = this.pendingQueue.shift()!;
           ws.send(item);
@@ -44,12 +58,14 @@ export class NativeBridgePort {
         for (const listener of this.disconnectListeners) {
           listener();
         }
-        if (!this.reconnectTimer) {
-          this.reconnectTimer = setTimeout(() => {
-            this.reconnectTimer = null;
-            this.connect();
-          }, 1500);
+        // BUG-016 fix: Clear existing timer before setting new one
+        if (this.reconnectTimer) {
+          clearTimeout(this.reconnectTimer);
         }
+        this.reconnectTimer = setTimeout(() => {
+          this.reconnectTimer = null;
+          this.connect();
+        }, 1500);
       };
       ws.onerror = () => {
         // onclose will handle reconnect
@@ -59,6 +75,66 @@ export class NativeBridgePort {
       this.ws = null;
       return this.connectNativeFallback();
     }
+  }
+
+  private async fetchAuthToken(): Promise<void> {
+    try {
+      // Try to get token from storage first (may have been set via native host)
+      const stored = await chrome.storage.local.get('relay_auth_token');
+      if (stored?.relay_auth_token) {
+        this.authToken = stored.relay_auth_token;
+        return;
+      }
+
+      // Request token from native host
+      await this.requestTokenFromNativeHost();
+    } catch (err) {
+      console.error('Failed to fetch auth token:', err);
+      // Continue without token - broker will reject but extension stays functional
+    }
+  }
+
+  private async requestTokenFromNativeHost(): Promise<void> {
+    return new Promise((resolve) => {
+      try {
+        const port = chrome.runtime.connectNative(NATIVE_HOST_NAME);
+        let resolved = false;
+
+        const timeout = setTimeout(() => {
+          if (!resolved) {
+            resolved = true;
+            port.disconnect();
+            resolve();
+          }
+        }, 2000);
+
+        port.onMessage.addListener((msg: any) => {
+          if (!resolved && msg?.auth_token) {
+            resolved = true;
+            clearTimeout(timeout);
+            this.authToken = msg.auth_token;
+            // Cache in storage for future use
+            chrome.storage.local.set({ relay_auth_token: msg.auth_token }).catch(() => {});
+            port.disconnect();
+            resolve();
+          }
+        });
+
+        port.onDisconnect.addListener(() => {
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(timeout);
+            resolve();
+          }
+        });
+
+        // Request token
+        port.postMessage({ request: 'get_auth_token' });
+      } catch (err) {
+        console.error('Failed to connect to native host for token:', err);
+        resolve();
+      }
+    });
   }
 
   private startKeepAlive(): void {

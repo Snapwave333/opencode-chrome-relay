@@ -7,6 +7,17 @@ use crate::state_machine::RunSession;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+// Helper to recover from poisoned mutex (BUG-002 fix)
+fn lock_or_recover<T>(mutex: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, String> {
+    match mutex.lock() {
+        Ok(guard) => Ok(guard),
+        Err(poisoned) => {
+            eprintln!("WARNING: Scheduler mutex was poisoned, recovering...");
+            Ok(poisoned.into_inner())
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Scheduler {
     db: Database,
@@ -26,22 +37,28 @@ impl Scheduler {
     }
 
     pub fn set_mode(&self, mode: AuthorizationMode) {
-        *self.auth_mode.lock().unwrap() = mode;
+        if let Ok(mut guard) = lock_or_recover(&self.auth_mode) {
+            *guard = mode;
+        }
     }
 
     pub fn set_allowed_origins(&self, origins: Vec<String>) {
-        *self.allowed_origins.lock().unwrap() = origins;
+        if let Ok(mut guard) = lock_or_recover(&self.allowed_origins) {
+            *guard = origins;
+        }
     }
 
     pub fn set_session_state(&self, run_id: &str, state: ExecutionState) {
-        let mut map = self.sessions.lock().unwrap();
-        if let Some(session) = map.get_mut(run_id) {
-            session.state = state;
+        if let Ok(mut map) = lock_or_recover(&self.sessions) {
+            if let Some(session) = map.get_mut(run_id) {
+                session.state = state;
+            }
         }
     }
 
     pub fn create_session(&self, run_id: &str, name: Option<&str>) -> RunSession {
-        let mut map = self.sessions.lock().unwrap();
+        let mut map = lock_or_recover(&self.sessions)
+            .expect("FATAL: Could not recover scheduler sessions mutex");
         let session_name = name
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("Session {}", &run_id[..std::cmp::min(run_id.len(), 8)]));
@@ -62,7 +79,7 @@ impl Scheduler {
     }
 
     pub fn set_session_pinned(&self, run_id: &str, is_pinned: bool) -> Result<(), String> {
-        let mut map = self.sessions.lock().unwrap();
+        let mut map = lock_or_recover(&self.sessions)?;
         if let Some(session) = map.get_mut(run_id) {
             session.is_pinned = is_pinned;
         }
@@ -72,7 +89,7 @@ impl Scheduler {
     }
 
     pub fn delete_session(&self, run_id: &str) -> Result<(), String> {
-        let mut map = self.sessions.lock().unwrap();
+        let mut map = lock_or_recover(&self.sessions)?;
         if let Some(session) = map.remove(run_id) {
             if let Some(tab_id) = session.tab_id {
                 let _ = self.db.release_tab_lease(tab_id, run_id);
@@ -82,7 +99,7 @@ impl Scheduler {
     }
 
     pub fn close_session(&self, run_id: &str) -> Result<bool, String> {
-        let mut map = self.sessions.lock().unwrap();
+        let mut map = lock_or_recover(&self.sessions)?;
         let session = map.get(run_id).cloned();
         match session {
             Some(s) => {
@@ -107,18 +124,20 @@ impl Scheduler {
     }
 
     pub fn list_sessions(&self) -> Vec<RunSession> {
-        let map = self.sessions.lock().unwrap();
+        let map = lock_or_recover(&self.sessions)
+            .expect("FATAL: Could not recover scheduler sessions mutex");
         map.values().cloned().collect()
     }
 
     pub fn cleanup_unpinned(&self) -> Result<usize, String> {
-        let mut map = self.sessions.lock().unwrap();
+        let mut map = lock_or_recover(&self.sessions)?;
         map.retain(|_, s| s.is_pinned);
         self.db.cleanup_unpinned_runs().map_err(|e| e.to_string())
     }
 
     pub fn get_or_create_session(&self, run_id: &str) -> RunSession {
-        let mut map = self.sessions.lock().unwrap();
+        let mut map = lock_or_recover(&self.sessions)
+            .expect("FATAL: Could not recover scheduler sessions mutex");
         map.entry(run_id.to_string())
             .or_insert_with(|| {
                 let session = RunSession::new(run_id.to_string());
@@ -140,7 +159,7 @@ impl Scheduler {
 
     pub fn handle_control(&self, cmd: &ControlCommand) -> Result<ExecutionState, String> {
         let _ = self.get_or_create_session(&cmd.run_id);
-        let mut map = self.sessions.lock().unwrap();
+        let mut map = lock_or_recover(&self.sessions)?;
         let session = map
             .get_mut(&cmd.run_id)
             .ok_or_else(|| "Session not found".to_string())?;
@@ -170,13 +189,21 @@ impl Scheduler {
         let action = envelope.action.as_ref().ok_or("Missing action")?;
 
         let _ = self.get_or_create_session(run_id);
-        let mut map = self.sessions.lock().unwrap();
+        let mut map = lock_or_recover(&self.sessions)?;
         let session = map
             .get_mut(run_id)
             .ok_or_else(|| "Session not found".to_string())?;
 
         // Check cancellation fence
         session.can_admit_action(epoch)?;
+        
+        // Double-check epoch hasn't changed while we held the lock
+        if session.epoch != epoch {
+            return Err(format!(
+                "Epoch changed during admission: command had {}, session now at {}",
+                epoch, session.epoch
+            ));
+        }
 
         // Check tab lease if tab specified
         if let Some(tab_id) = envelope.tab_id {
@@ -197,8 +224,8 @@ impl Scheduler {
         }
 
         // Evaluate policy
-        let mode = self.auth_mode.lock().unwrap().clone();
-        let allowed = self.allowed_origins.lock().unwrap().clone();
+        let mode = lock_or_recover(&self.auth_mode)?.clone();
+        let allowed = lock_or_recover(&self.allowed_origins)?.clone();
         let origin = action.expected_origin.as_deref().unwrap_or("");
         let pol = evaluate_action(&mode, action, origin, &allowed);
 
@@ -238,7 +265,12 @@ impl Scheduler {
         verified: bool,
         outcome_json: &str,
     ) -> Result<(), String> {
-        // Sanitize and purge screenshots right after use
+        // BUG-012 mitigation: Sanitize and purge screenshots right after use
+        // Note: Screenshot base64 still arrives via WebSocket (can't avoid without
+        // changing extension to write temp files). This prevents database bloat
+        // by purging before SQLite write, but memory spike still occurs during
+        // WebSocket receive. Full fix would require extension writing screenshots
+        // to temp files and only sending file paths.
         let sanitized_outcome =
             if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(outcome_json) {
                 // Delete screenshot from disk if temporary file path was passed

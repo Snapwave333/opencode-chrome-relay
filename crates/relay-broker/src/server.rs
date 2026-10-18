@@ -68,7 +68,8 @@ async fn handle_connection(
     let ws_stream = accept_async(stream).await?;
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
 
-    let mut authenticated = auth_token.is_empty();
+    // ALWAYS require authentication - no bypass
+    let mut authenticated = false;
 
     loop {
         tokio::select! {

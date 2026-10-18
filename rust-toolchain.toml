@@ -1,0 +1,4 @@
+[toolchain]
+channel = "stable"
+# Minimum version that supports dependencies requiring edition2024 features
+# Rust 1.85+ required for icu_provider v2.3.1
