@@ -17,7 +17,7 @@ impl RunSession {
     pub fn new(run_id: String) -> Self {
         RunSession {
             run_id: run_id.clone(),
-            name: format!("Session {}", &run_id[..std::cmp::min(run_id.len(), 8)]),
+            name: format!("Session {}", run_id.chars().take(8).collect::<String>()),
             is_pinned: false,
             state: ExecutionState::Ready,
             epoch: 0,

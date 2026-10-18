@@ -77,8 +77,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if msg.is_text() {
                     if let Ok(text) = msg.to_text() {
                         let mut out = stdout();
-                        if framing::write_native_message(&mut out, text).is_err() {
-                            break;
+                        match framing::write_native_message(&mut out, text) {
+                            Ok(()) => {}
+                            Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {
+                                eprintln!(
+                                    "Dropping oversized broker message ({} bytes)",
+                                    text.len()
+                                );
+                            }
+                            Err(_) => break,
                         }
                     }
                 }

@@ -1,10 +1,55 @@
 use crate::protocol::{ControlCommand, ProtocolEnvelope};
 use crate::scheduler::Scheduler;
 use futures_util::{SinkExt, StreamExt};
+use serde::Deserialize;
 use std::net::SocketAddr;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
-use tokio_tungstenite::accept_async;
+use tokio_tungstenite::accept_hdr_async;
+use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+use tokio_tungstenite::tungstenite::http::StatusCode;
+use tokio_tungstenite::tungstenite::Message;
+
+const BROADCAST_CAPACITY: usize = 1024;
+const AUTH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+const RELAYABLE_EVENTS: &[&str] = &[
+    "action.preview",
+    "approval.resolved",
+    "bridge.connected",
+    "bridge.disconnected",
+    "bridge.heartbeat",
+    "chat.response",
+    "checkpoint.saved",
+    "extension.reload",
+    "observation.ready",
+    "run.completed",
+    "run.started",
+    "session.bound",
+    "session.switched",
+    "steer.received",
+    "tab.attach_requested",
+    "tab.attached",
+    "tab.detached",
+];
+
+fn is_allowed_origin(origin: Option<&str>) -> bool {
+    match origin {
+        None => true,
+        Some(o) => {
+            o.starts_with("chrome-extension://")
+                || o.starts_with("http://127.0.0.1")
+                || o.starts_with("http://localhost")
+        }
+    }
+}
+
+fn tokens_match(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
 
 pub struct BrokerServer {
     addr: SocketAddr,
@@ -15,7 +60,7 @@ pub struct BrokerServer {
 
 impl BrokerServer {
     pub fn new(addr: SocketAddr, auth_token: String, scheduler: Scheduler) -> Self {
-        let (tx, _rx) = broadcast::channel(100);
+        let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
         BrokerServer {
             addr,
             auth_token,
@@ -65,23 +110,45 @@ async fn handle_connection(
     event_tx: broadcast::Sender<String>,
     event_rx: &mut broadcast::Receiver<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let ws_stream = accept_async(stream).await?;
+    #[allow(clippy::result_large_err)]
+    let check_origin = |req: &Request, resp: Response| -> Result<Response, ErrorResponse> {
+        let origin = req.headers().get("origin").and_then(|o| o.to_str().ok());
+        if is_allowed_origin(origin) {
+            Ok(resp)
+        } else {
+            let mut err = ErrorResponse::new(Some("Forbidden origin".into()));
+            *err.status_mut() = StatusCode::FORBIDDEN;
+            Err(err)
+        }
+    };
+    let ws_stream = accept_hdr_async(stream, check_origin).await?;
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
 
     let mut authenticated = auth_token.is_empty();
+    let auth_deadline = tokio::time::sleep(AUTH_DEADLINE);
+    tokio::pin!(auth_deadline);
 
     loop {
         tokio::select! {
+            _ = &mut auth_deadline, if !authenticated => {
+                let unauth = serde_json::json!({ "error": "Authentication timeout" });
+                ws_sender.send(Message::Text(unauth.to_string())).await?;
+                return Ok(());
+            }
             msg_res = ws_receiver.next() => {
                 match msg_res {
                     Some(Ok(msg)) => {
                         if msg.is_text() {
                             let text = msg.to_text()?;
-                            let parsed: serde_json::Value = serde_json::from_str(text)?;
+                            let Ok(parsed) = serde_json::from_str::<serde_json::Value>(text) else {
+                                let err = serde_json::json!({ "error": "Invalid JSON message" });
+                                ws_sender.send(Message::Text(err.to_string())).await?;
+                                continue;
+                            };
 
                             if !authenticated {
                                 if let Some(token) = parsed.get("auth_token").and_then(|t| t.as_str()) {
-                                    if token == auth_token {
+                                    if tokens_match(token, &auth_token) {
                                         authenticated = true;
                                         let ok_resp = serde_json::json!({
                                             "v": 1,
@@ -89,26 +156,26 @@ async fn handle_connection(
                                             "event_id": "auth_ok",
                                             "status": "authenticated"
                                         });
-                                        ws_sender.send(tokio_tungstenite::tungstenite::Message::Text(ok_resp.to_string())).await?;
+                                        ws_sender.send(Message::Text(ok_resp.to_string())).await?;
                                         continue;
                                     }
                                 }
                                 let unauth = serde_json::json!({ "error": "Unauthorized" });
-                                ws_sender.send(tokio_tungstenite::tungstenite::Message::Text(unauth.to_string())).await?;
+                                ws_sender.send(Message::Text(unauth.to_string())).await?;
                                 return Ok(());
                             }
 
                             // Process message
-                            if let Ok(ctrl) = serde_json::from_value::<ControlCommand>(parsed.clone()) {
+                            if let Ok(ctrl) = ControlCommand::deserialize(&parsed) {
                                 match scheduler.handle_control(&ctrl) {
-                                    Ok(new_state) => {
+                                    Ok((new_state, epoch)) => {
                                         let resp = serde_json::json!({
                                             "v": 1,
                                             "event": "run.state_changed",
                                             "event_id": uuid::Uuid::new_v4().to_string(),
                                             "timestamp": chrono::Utc::now().to_rfc3339(),
                                             "run_id": ctrl.run_id,
-                                            "epoch": ctrl.epoch,
+                                            "epoch": epoch,
                                             "payload": {
                                                 "new_state": new_state,
                                                 "command": ctrl.command,
@@ -117,19 +184,33 @@ async fn handle_connection(
                                         });
                                         let resp_str = resp.to_string();
                                         let _ = event_tx.send(resp_str.clone());
-                                        ws_sender.send(tokio_tungstenite::tungstenite::Message::Text(resp_str)).await?;
+                                        ws_sender.send(Message::Text(resp_str)).await?;
                                     }
                                     Err(err) => {
                                         let err_resp = serde_json::json!({
                                             "error": err,
                                             "run_id": ctrl.run_id
                                         });
-                                        ws_sender.send(tokio_tungstenite::tungstenite::Message::Text(err_resp.to_string())).await?;
+                                        ws_sender.send(Message::Text(err_resp.to_string())).await?;
                                     }
                                 }
-                            } else if let Ok(envelope) = serde_json::from_value::<ProtocolEnvelope>(parsed.clone()) {
+                            } else if let Ok(envelope) = ProtocolEnvelope::deserialize(&parsed) {
                                 if envelope.event == "browser.action.request" {
                                     match scheduler.submit_action(&envelope) {
+                                        Ok(policy) if policy.is_forbidden => {
+                                            let err_resp = serde_json::json!({
+                                                "v": 1,
+                                                "event": "action.failed",
+                                                "event_id": uuid::Uuid::new_v4().to_string(),
+                                                "timestamp": chrono::Utc::now().to_rfc3339(),
+                                                "run_id": envelope.run_id,
+                                                "idempotency_key": envelope.idempotency_key,
+                                                "payload": { "error": policy.reason, "is_forbidden": true }
+                                            });
+                                            let resp_str = err_resp.to_string();
+                                            let _ = event_tx.send(resp_str.clone());
+                                            ws_sender.send(Message::Text(resp_str)).await?;
+                                        }
                                         Ok(policy) => {
                                             let resp = serde_json::json!({
                                                 "v": 1,
@@ -150,7 +231,7 @@ async fn handle_connection(
                                             });
                                             let resp_str = resp.to_string();
                                             let _ = event_tx.send(resp_str.clone());
-                                            ws_sender.send(tokio_tungstenite::tungstenite::Message::Text(resp_str)).await?;
+                                            ws_sender.send(Message::Text(resp_str)).await?;
                                         }
                                         Err(err) => {
                                             let err_resp = serde_json::json!({
@@ -163,12 +244,29 @@ async fn handle_connection(
                                                 "payload": { "error": err }
                                             });
                                             let _ = event_tx.send(err_resp.to_string());
-                                            ws_sender.send(tokio_tungstenite::tungstenite::Message::Text(err_resp.to_string())).await?;
+                                            ws_sender.send(Message::Text(err_resp.to_string())).await?;
                                         }
                                     }
                                 } else if envelope.event == "action.started" {
-                                    let _ = scheduler.submit_action(&envelope);
-                                    let _ = event_tx.send(text.to_string());
+                                    match scheduler.evaluate_relayed_action(&envelope) {
+                                        Ok(policy) if !policy.is_forbidden && !policy.requires_approval => {
+                                            let _ = event_tx.send(text.to_string());
+                                        }
+                                        Ok(policy) => {
+                                            let err = serde_json::json!({
+                                                "error": policy.reason.unwrap_or_else(|| "Action requires approval".into()),
+                                                "idempotency_key": envelope.idempotency_key
+                                            });
+                                            ws_sender.send(Message::Text(err.to_string())).await?;
+                                        }
+                                        Err(err) => {
+                                            let err = serde_json::json!({
+                                                "error": err,
+                                                "idempotency_key": envelope.idempotency_key
+                                            });
+                                            ws_sender.send(Message::Text(err.to_string())).await?;
+                                        }
+                                    }
                                 } else if envelope.event == "action.finished" || envelope.event == "action.failed" {
                                     if let Some(idem) = envelope.idempotency_key.as_deref() {
                                         let is_ok = envelope.event == "action.finished";
@@ -198,7 +296,7 @@ async fn handle_connection(
                                     });
                                     let resp_str = resp.to_string();
                                     let _ = event_tx.send(resp_str.clone());
-                                    ws_sender.send(tokio_tungstenite::tungstenite::Message::Text(resp_str)).await?;
+                                    ws_sender.send(Message::Text(resp_str)).await?;
                                 } else if envelope.event == "session.delete" {
                                     if let Some(run_id) = envelope.run_id {
                                         let _ = scheduler.delete_session(&run_id);
@@ -211,7 +309,7 @@ async fn handle_connection(
                                         });
                                         let resp_str = resp.to_string();
                                         let _ = event_tx.send(resp_str.clone());
-                                        ws_sender.send(tokio_tungstenite::tungstenite::Message::Text(resp_str)).await?;
+                                        ws_sender.send(Message::Text(resp_str)).await?;
                                     }
                                 } else if envelope.event == "session.pin" {
                                     if let Some(run_id) = envelope.run_id {
@@ -226,7 +324,7 @@ async fn handle_connection(
                                         });
                                         let resp_str = resp.to_string();
                                         let _ = event_tx.send(resp_str.clone());
-                                        ws_sender.send(tokio_tungstenite::tungstenite::Message::Text(resp_str)).await?;
+                                        ws_sender.send(Message::Text(resp_str)).await?;
                                     }
                                 } else if envelope.event == "session.close" {
                                     if let Some(run_id) = envelope.run_id {
@@ -241,7 +339,7 @@ async fn handle_connection(
                                         });
                                         let resp_str = resp.to_string();
                                         let _ = event_tx.send(resp_str.clone());
-                                        ws_sender.send(tokio_tungstenite::tungstenite::Message::Text(resp_str)).await?;
+                                        ws_sender.send(Message::Text(resp_str)).await?;
                                     }
                                 } else if envelope.event == "session.list" {
                                     let sessions = scheduler.list_sessions();
@@ -260,9 +358,8 @@ async fn handle_connection(
                                         "event_id": uuid::Uuid::new_v4().to_string(),
                                         "payload": { "sessions": session_items }
                                     });
-                                    ws_sender.send(tokio_tungstenite::tungstenite::Message::Text(resp.to_string())).await?;
-                                } else {
-                                    // Broadcast other events
+                                    ws_sender.send(Message::Text(resp.to_string())).await?;
+                                } else if RELAYABLE_EVENTS.contains(&envelope.event.as_str()) {
                                     let _ = event_tx.send(text.to_string());
                                 }
                             }
@@ -272,9 +369,19 @@ async fn handle_connection(
                     None => break,
                 }
             }
-            ev = event_rx.recv() => {
-                if let Ok(ev_str) = ev {
-                    ws_sender.send(tokio_tungstenite::tungstenite::Message::Text(ev_str)).await?;
+            ev = event_rx.recv(), if authenticated => {
+                match ev {
+                    Ok(ev_str) => ws_sender.send(Message::Text(ev_str)).await?,
+                    Err(broadcast::error::RecvError::Lagged(dropped)) => {
+                        let notice = serde_json::json!({
+                            "v": 1,
+                            "event": "bridge.lagged",
+                            "event_id": uuid::Uuid::new_v4().to_string(),
+                            "payload": { "dropped": dropped }
+                        });
+                        ws_sender.send(Message::Text(notice.to_string())).await?;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
         }

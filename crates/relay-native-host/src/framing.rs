@@ -29,8 +29,16 @@ pub fn read_native_message<R: Read>(mut reader: R) -> io::Result<Option<String>>
     Ok(Some(s))
 }
 
+pub const MAX_MESSAGE_TO_CHROME: usize = 1024 * 1024;
+
 pub fn write_native_message<W: Write>(mut writer: W, msg: &str) -> io::Result<()> {
     let bytes = msg.as_bytes();
+    if bytes.len() > MAX_MESSAGE_TO_CHROME {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Native message exceeds Chrome's 1MB host-to-extension limit",
+        ));
+    }
     let mut len_buf = [0u8; 4];
     LittleEndian::write_u32(&mut len_buf, bytes.len() as u32);
 
@@ -55,6 +63,15 @@ mod tests {
         let mut cursor = std::io::Cursor::new(buffer);
         let read_back = read_native_message(&mut cursor).unwrap();
         assert_eq!(read_back, Some(original.to_string()));
+    }
+
+    #[test]
+    fn test_oversized_message_rejected_without_writing() {
+        let oversized = "x".repeat(MAX_MESSAGE_TO_CHROME + 1);
+        let mut buffer = Vec::new();
+        let err = write_native_message(&mut buffer, &oversized).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(buffer.is_empty());
     }
 
     #[test]

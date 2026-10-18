@@ -7,12 +7,27 @@ pub struct PolicyResult {
 }
 
 pub fn is_forbidden_url(url: &str) -> bool {
-    let lower = url.to_lowercase();
-    lower.starts_with("chrome://")
-        || lower.starts_with("chrome-extension://")
-        || lower.starts_with("edge://")
-        || lower.starts_with("about:")
-        || lower.starts_with("devtools://")
+    const DENIED_SCHEMES: &[&str] = &[
+        "chrome:",
+        "chrome-extension:",
+        "chrome-untrusted:",
+        "chrome-search:",
+        "edge:",
+        "about:",
+        "devtools:",
+        "javascript:",
+        "file:",
+        "view-source:",
+        "data:",
+        "blob:",
+    ];
+    let lower = url.trim().to_ascii_lowercase();
+    if lower == "about:blank" {
+        return false;
+    }
+    DENIED_SCHEMES
+        .iter()
+        .any(|scheme| lower.starts_with(scheme))
 }
 
 pub fn is_sensitive_pattern(text: &str) -> bool {

@@ -44,7 +44,7 @@ impl Scheduler {
         let mut map = self.sessions.lock().unwrap();
         let session_name = name
             .map(|s| s.to_string())
-            .unwrap_or_else(|| format!("Session {}", &run_id[..std::cmp::min(run_id.len(), 8)]));
+            .unwrap_or_else(|| format!("Session {}", run_id.chars().take(8).collect::<String>()));
         let session = RunSession::with_name(run_id.to_string(), session_name.clone());
         let _ = self.db.create_or_update_run(
             run_id,
@@ -138,7 +138,7 @@ impl Scheduler {
             .clone()
     }
 
-    pub fn handle_control(&self, cmd: &ControlCommand) -> Result<ExecutionState, String> {
+    pub fn handle_control(&self, cmd: &ControlCommand) -> Result<(ExecutionState, u64), String> {
         let _ = self.get_or_create_session(&cmd.run_id);
         let mut map = self.sessions.lock().unwrap();
         let session = map
@@ -156,7 +156,7 @@ impl Scheduler {
             }
         }
 
-        Ok(new_state)
+        Ok((new_state, session.epoch))
     }
 
     pub fn submit_action(&self, envelope: &ProtocolEnvelope) -> Result<PolicyResult, String> {
@@ -231,6 +231,20 @@ impl Scheduler {
         Ok(pol)
     }
 
+    pub fn evaluate_relayed_action(
+        &self,
+        envelope: &ProtocolEnvelope,
+    ) -> Result<PolicyResult, String> {
+        let run_id = envelope.run_id.as_deref().ok_or("Missing run_id")?;
+        let action = envelope.action.as_ref().ok_or("Missing action")?;
+        let session = self.get_or_create_session(run_id);
+        session.can_admit_action(envelope.epoch.unwrap_or(0))?;
+        let mode = self.auth_mode.lock().unwrap().clone();
+        let allowed = self.allowed_origins.lock().unwrap().clone();
+        let origin = action.expected_origin.as_deref().unwrap_or("");
+        Ok(evaluate_action(&mode, action, origin, &allowed))
+    }
+
     pub fn complete_action(
         &self,
         idempotency_key: &str,
@@ -243,7 +257,9 @@ impl Scheduler {
             if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(outcome_json) {
                 // Delete screenshot from disk if temporary file path was passed
                 if let Some(path) = val.get("screenshot_path").and_then(|p| p.as_str()) {
-                    let _ = std::fs::remove_file(path);
+                    if is_purgeable_screenshot(path) {
+                        let _ = std::fs::remove_file(path);
+                    }
                 }
                 // Purge large screenshot base64 bytes from SQLite journal
                 if val.get("screenshot_base64").is_some() {
@@ -258,5 +274,29 @@ impl Scheduler {
         self.db
             .record_action_result(idempotency_key, success, verified, &sanitized_outcome)
             .map_err(|e| e.to_string())
+    }
+}
+
+fn is_purgeable_screenshot(path: &str) -> bool {
+    let path = std::path::Path::new(path);
+    let is_image = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            matches!(
+                e.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "webp"
+            )
+        })
+        .unwrap_or(false);
+    if !is_image {
+        return false;
+    }
+    match (
+        std::fs::canonicalize(path),
+        std::fs::canonicalize(std::env::temp_dir()),
+    ) {
+        (Ok(file), Ok(tmp)) => file.starts_with(tmp),
+        _ => false,
     }
 }

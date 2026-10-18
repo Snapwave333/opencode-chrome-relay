@@ -149,6 +149,7 @@ mod tests {
                 scroll_amount: None,
                 risk: RiskLevel::ReadOnly,
                 is_irreversible: false,
+                extra: Default::default(),
             }),
         };
 
@@ -165,7 +166,7 @@ mod tests {
             restart_options: None,
             reason: None,
         };
-        let new_state = scheduler.handle_control(&ctrl).unwrap();
+        let (new_state, _) = scheduler.handle_control(&ctrl).unwrap();
         assert_eq!(new_state, ExecutionState::Paused);
 
         // Action while paused must fail
@@ -236,5 +237,69 @@ mod tests {
         // 3. Manual deletion removes it even if pinned
         scheduler.delete_session("sess_pinned").unwrap();
         assert_eq!(scheduler.list_sessions().len(), 0);
+    }
+
+    #[test]
+    fn test_forbidden_url_schemes_and_whitespace() {
+        assert!(is_forbidden_url("  chrome://settings"));
+        assert!(is_forbidden_url("JavaScript:alert(1)"));
+        assert!(is_forbidden_url("file:///etc/passwd"));
+        assert!(is_forbidden_url("view-source:https://example.com"));
+        assert!(!is_forbidden_url("about:blank"));
+    }
+
+    #[test]
+    fn test_multibyte_run_id_does_not_panic() {
+        let db = Database::new_in_memory().unwrap();
+        let scheduler = Scheduler::new(db);
+        let session = scheduler.create_session("abcdefgé-run", None);
+        assert_eq!(session.name, "Session abcdefgé");
+    }
+
+    #[test]
+    fn test_screenshot_outside_temp_dir_is_not_deleted() {
+        let db = Database::new_in_memory().unwrap();
+        let scheduler = Scheduler::new(db.clone());
+        let dir = tempfile::Builder::new()
+            .prefix("relay-keep")
+            .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+            .unwrap();
+        let keep = dir.path().join("keep.png");
+        std::fs::write(&keep, b"keep").unwrap();
+        db.record_action_pending("run_keep", 0, 1, "run_keep:0:1", "browser_screenshot", "{}")
+            .unwrap();
+        let outcome = serde_json::json!({ "screenshot_path": keep.to_str().unwrap() });
+        scheduler
+            .complete_action("run_keep:0:1", true, true, &outcome.to_string())
+            .unwrap();
+        assert!(keep.exists());
+    }
+
+    #[test]
+    fn test_finished_action_replay_rejected() {
+        let db = Database::new_in_memory().unwrap();
+        assert!(db
+            .record_action_pending("run_r", 0, 1, "k1", "browser_click", "{}")
+            .unwrap());
+        assert!(db
+            .record_action_pending("run_r", 0, 1, "k1", "browser_click", "{}")
+            .unwrap());
+        assert!(!db
+            .record_action_pending("run_other", 0, 1, "k1", "browser_click", "{}")
+            .unwrap());
+        db.record_action_result("k1", true, true, "{}").unwrap();
+        assert!(!db
+            .record_action_pending("run_r", 0, 1, "k1", "browser_click", "{}")
+            .unwrap());
+    }
+
+    #[test]
+    fn test_locator_test_id_round_trips_camel_case() {
+        let raw = serde_json::json!({ "testId": "submit-btn", "index": 3 });
+        let loc: crate::protocol::ElementLocator = serde_json::from_value(raw).unwrap();
+        assert_eq!(loc.test_id.as_deref(), Some("submit-btn"));
+        let back = serde_json::to_value(&loc).unwrap();
+        assert_eq!(back["testId"], "submit-btn");
+        assert_eq!(back["index"], 3);
     }
 }

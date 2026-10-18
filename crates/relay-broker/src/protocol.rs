@@ -39,8 +39,11 @@ pub struct ElementLocator {
     pub name: Option<String>,
     pub selector: Option<String>,
     pub text: Option<String>,
+    #[serde(rename = "testId", alias = "test_id")]
     pub test_id: Option<String>,
     pub point: Option<Point>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +72,8 @@ pub struct ActionPayload {
     pub risk: RiskLevel,
     #[serde(default)]
     pub is_irreversible: bool,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 fn default_risk() -> RiskLevel {

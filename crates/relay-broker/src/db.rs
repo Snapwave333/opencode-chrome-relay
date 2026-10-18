@@ -30,6 +30,10 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         conn.execute_batch(
             "
+            PRAGMA journal_mode = WAL;
+            PRAGMA synchronous = NORMAL;
+            PRAGMA foreign_keys = ON;
+
             CREATE TABLE IF NOT EXISTS runs (
                 run_id TEXT PRIMARY KEY,
                 name TEXT,
@@ -89,6 +93,11 @@ impl Database {
                 created_at TEXT NOT NULL,
                 resolved_at TEXT
             );
+
+            CREATE INDEX IF NOT EXISTS idx_action_journal_run ON action_journal(run_id);
+            CREATE INDEX IF NOT EXISTS idx_checkpoints_run ON checkpoints(run_id);
+            CREATE INDEX IF NOT EXISTS idx_approvals_run ON approvals(run_id);
+            CREATE INDEX IF NOT EXISTS idx_tab_leases_owner ON tab_leases(owner_run_id);
             ",
         )?;
         Ok(())
@@ -148,45 +157,45 @@ impl Database {
     }
 
     pub fn delete_run(&self, run_id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
             "DELETE FROM action_journal WHERE run_id = ?1",
             params![run_id],
         )?;
-        conn.execute("DELETE FROM checkpoints WHERE run_id = ?1", params![run_id])?;
-        conn.execute(
+        tx.execute("DELETE FROM checkpoints WHERE run_id = ?1", params![run_id])?;
+        tx.execute(
             "DELETE FROM tab_leases WHERE owner_run_id = ?1",
             params![run_id],
         )?;
-        conn.execute("DELETE FROM approvals WHERE run_id = ?1", params![run_id])?;
-        conn.execute("DELETE FROM runs WHERE run_id = ?1", params![run_id])?;
-        Ok(())
+        tx.execute("DELETE FROM approvals WHERE run_id = ?1", params![run_id])?;
+        tx.execute("DELETE FROM runs WHERE run_id = ?1", params![run_id])?;
+        tx.commit()
     }
 
     pub fn cleanup_unpinned_runs(&self) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
-        // Collect unpinned run_ids
-        let mut stmt = conn.prepare("SELECT run_id FROM runs WHERE is_pinned = 0")?;
-        let run_ids: Vec<String> = stmt
-            .query_map([], |row| row.get(0))?
-            .filter_map(|r| r.ok())
-            .collect();
-
-        for run_id in &run_ids {
-            conn.execute(
-                "DELETE FROM action_journal WHERE run_id = ?1",
-                params![run_id],
-            )?;
-            conn.execute("DELETE FROM checkpoints WHERE run_id = ?1", params![run_id])?;
-            conn.execute(
-                "DELETE FROM tab_leases WHERE owner_run_id = ?1",
-                params![run_id],
-            )?;
-            conn.execute("DELETE FROM approvals WHERE run_id = ?1", params![run_id])?;
-            conn.execute("DELETE FROM runs WHERE run_id = ?1", params![run_id])?;
-        }
-
-        Ok(run_ids.len())
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        const UNPINNED: &str = "(SELECT run_id FROM runs WHERE is_pinned = 0)";
+        tx.execute(
+            &format!("DELETE FROM action_journal WHERE run_id IN {UNPINNED}"),
+            [],
+        )?;
+        tx.execute(
+            &format!("DELETE FROM checkpoints WHERE run_id IN {UNPINNED}"),
+            [],
+        )?;
+        tx.execute(
+            &format!("DELETE FROM tab_leases WHERE owner_run_id IN {UNPINNED}"),
+            [],
+        )?;
+        tx.execute(
+            &format!("DELETE FROM approvals WHERE run_id IN {UNPINNED}"),
+            [],
+        )?;
+        let removed = tx.execute("DELETE FROM runs WHERE is_pinned = 0", [])?;
+        tx.commit()?;
+        Ok(removed)
     }
 
     pub fn update_run_state(&self, run_id: &str, state: ExecutionState, epoch: u64) -> Result<()> {
@@ -213,27 +222,16 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let now = chrono::Utc::now().to_rfc3339();
 
-        // Check if already exists
-        let mut stmt =
-            conn.prepare("SELECT status FROM action_journal WHERE idempotency_key = ?1")?;
-        let mut rows = stmt.query(params![idempotency_key])?;
-        if let Some(row) = rows.next()? {
-            let status: String = row.get(0)?;
-            // Already recorded, cannot re-execute if finished or failed
-            if status == "finished" {
-                return Ok(false);
-            }
-        }
-
-        conn.execute(
+        let changed = conn.execute(
             "INSERT INTO action_journal (run_id, epoch, sequence, idempotency_key, action_type, status, payload_json, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6, ?7, ?7)
              ON CONFLICT(idempotency_key) DO UPDATE SET
                 status = 'pending',
-                updated_at = excluded.updated_at;",
+                updated_at = excluded.updated_at
+             WHERE action_journal.status != 'finished' AND action_journal.run_id = excluded.run_id;",
             params![run_id, epoch, sequence, idempotency_key, action_type, payload_json, now],
         )?;
-        Ok(true)
+        Ok(changed == 1)
     }
 
     pub fn record_action_result(
@@ -302,7 +300,10 @@ impl Database {
         if let Some(row) = rows.next()? {
             let owner: String = row.get(0)?;
             let exp_str: String = row.get(1)?;
-            if owner != run_id && exp_str > now_str {
+            let still_active = chrono::DateTime::parse_from_rfc3339(&exp_str)
+                .map(|exp| exp > now)
+                .unwrap_or(false);
+            if owner != run_id && still_active {
                 // Active lease owned by another run
                 return Ok(false);
             }
