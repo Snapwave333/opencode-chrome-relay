@@ -570,7 +570,7 @@ async function handleActionRequest(
 
             const activeDialogs = findActiveDialogs(document);
 
-            // 1. Strict Index Resolution (never fall through to fuzzy text matching for index locators)
+            // BUG-011: Removed data-relay-index stamping - always reconstruct
             const indexMatch = loc?.selector?.match(/^\[data-relay-index="(\d+)"\]$/);
             const targetIndex = indexMatch
               ? parseInt(indexMatch[1], 10)
@@ -579,19 +579,7 @@ async function handleActionRequest(
               : null;
 
             if (targetIndex !== null) {
-              // Try direct attribute first in dialogs, then document
-              for (const d of activeDialogs) {
-                const el = d.querySelector(`[data-relay-index="${targetIndex}"]`) as HTMLElement | null;
-                if (el && isVisible(el)) {
-                  return triggerClick(el);
-                }
-              }
-              const stamped = document.querySelector(`[data-relay-index="${targetIndex}"]`) as HTMLElement | null;
-              if (stamped && isVisible(stamped)) {
-                return triggerClick(stamped);
-              }
-
-              // Stamped attribute missing or stale: reconstruct interactive elements in exact observeTab order
+              // Reconstruct interactive elements without relying on DOM attributes
               const selectorQuery =
                 'button, a[href], input:not([type="hidden"]), select, textarea, [role="button"], [role="menuitem"], [role="option"], [role="tab"], [role="checkbox"], mat-select, mat-option, summary, [tabindex="0"]';
               const dialogElements: Element[] = [];
@@ -783,39 +771,33 @@ async function handleActionRequest(
               ? loc.index
               : null;
 
+            // BUG-011: Removed data-relay-index stamping
             if (targetIndex !== null) {
-              const stamped = document.querySelector(`[data-relay-index="${targetIndex}"]`) as HTMLElement | null;
-              if (stamped) {
-                target = (stamped.matches('input:not([type="hidden"]), textarea, [contenteditable="true"]')
-                  ? stamped
-                  : stamped.querySelector('input:not([type="hidden"]), textarea, [contenteditable="true"]')) as HTMLInputElement | null;
+              // Reconstruct elements without relying on DOM attributes
+              const selectorQuery =
+                'button, a[href], input:not([type="hidden"]), select, textarea, [role="button"], [role="menuitem"], [role="option"], [role="tab"], [role="checkbox"], mat-select, mat-option, summary, [tabindex="0"]';
+              const rawEls = Array.from(document.querySelectorAll(selectorQuery)).filter(isVisible);
+              const validEls: HTMLElement[] = [];
+              const seen = new Set<string>();
+              for (const el of rawEls) {
+                if (validEls.length >= 120) break;
+                const aria = (el.getAttribute("aria-label") || "").trim();
+                const placeholder = (el.getAttribute("placeholder") || "").trim();
+                const title = (el.getAttribute("title") || "").trim();
+                const t = ((el as HTMLElement).innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+                const label = (aria || t || placeholder || title).slice(0, 80);
+                if (!label) continue;
+                const tag = el.tagName.toLowerCase();
+                const dedupeKey = `${tag}:${label}`;
+                if (seen.has(dedupeKey)) continue;
+                seen.add(dedupeKey);
+                validEls.push(el as HTMLElement);
               }
-              if (!target) {
-                const selectorQuery =
-                  'button, a[href], input:not([type="hidden"]), select, textarea, [role="button"], [role="menuitem"], [role="option"], [role="tab"], [role="checkbox"], mat-select, mat-option, summary, [tabindex="0"]';
-                const rawEls = Array.from(document.querySelectorAll(selectorQuery)).filter(isVisible);
-                const validEls: HTMLElement[] = [];
-                const seen = new Set<string>();
-                for (const el of rawEls) {
-                  if (validEls.length >= 120) break;
-                  const aria = (el.getAttribute("aria-label") || "").trim();
-                  const placeholder = (el.getAttribute("placeholder") || "").trim();
-                  const title = (el.getAttribute("title") || "").trim();
-                  const t = ((el as HTMLElement).innerText || el.textContent || "").replace(/\s+/g, " ").trim();
-                  const label = (aria || t || placeholder || title).slice(0, 80);
-                  if (!label) continue;
-                  const tag = el.tagName.toLowerCase();
-                  const dedupeKey = `${tag}:${label}`;
-                  if (seen.has(dedupeKey)) continue;
-                  seen.add(dedupeKey);
-                  validEls.push(el as HTMLElement);
-                }
-                if (targetIndex >= 0 && targetIndex < validEls.length) {
-                  const el = validEls[targetIndex];
-                  target = (el.matches('input:not([type="hidden"]), textarea, [contenteditable="true"]')
-                    ? el
-                    : el.querySelector('input:not([type="hidden"]), textarea, [contenteditable="true"]')) as HTMLInputElement | null;
-                }
+              if (targetIndex >= 0 && targetIndex < validEls.length) {
+                const el = validEls[targetIndex];
+                target = (el.matches('input:not([type="hidden"]), textarea, [contenteditable="true"]')
+                  ? el
+                  : el.querySelector('input:not([type="hidden"]), textarea, [contenteditable="true"]')) as HTMLInputElement | null;
               }
             }
 
@@ -1056,17 +1038,34 @@ async function handleActionRequest(
               ? loc.index
               : null;
 
+            // BUG-011: Removed data-relay-index stamping - reconstruct if index provided
             if (targetIndex !== null) {
+              const selectorQuery =
+                'button, a[href], input:not([type="hidden"]), select, textarea, [role="button"], [role="menuitem"], [role="option"], [role="tab"], [role="checkbox"], mat-select, mat-option, summary, [tabindex="0"]';
+              const dialogElements: Element[] = [];
               for (const d of activeDialogs) {
-                const el = d.querySelector(`[data-relay-index="${targetIndex}"]`) as HTMLElement | null;
-                if (el && isVisible(el)) {
-                  const res = triggerHover(el);
-                  return { ok: true, summary: res.summary, x: res.cx, y: res.cy };
-                }
+                dialogElements.push(...Array.from(d.querySelectorAll(selectorQuery)).filter(isVisible));
               }
-              const stamped = document.querySelector(`[data-relay-index="${targetIndex}"]`) as HTMLElement | null;
-              if (stamped && isVisible(stamped)) {
-                const res = triggerHover(stamped);
+              const pageElements = Array.from(document.querySelectorAll(selectorQuery)).filter(isVisible);
+              const rawEls = Array.from(new Set([...dialogElements, ...pageElements]));
+              const validEls: HTMLElement[] = [];
+              const seen = new Set<string>();
+              for (const el of rawEls) {
+                if (validEls.length >= 120) break;
+                const aria = (el.getAttribute("aria-label") || "").trim();
+                const placeholder = (el.getAttribute("placeholder") || "").trim();
+                const title = (el.getAttribute("title") || "").trim();
+                const text = ((el as HTMLElement).innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+                const label = (aria || text || placeholder || title).slice(0, 80);
+                if (!label) continue;
+                const tag = el.tagName.toLowerCase();
+                const dedupeKey = `${tag}:${label}`;
+                if (seen.has(dedupeKey)) continue;
+                seen.add(dedupeKey);
+                validEls.push(el as HTMLElement);
+              }
+              if (targetIndex >= 0 && targetIndex < validEls.length) {
+                const res = triggerHover(validEls[targetIndex]);
                 return { ok: true, summary: res.summary, x: res.cx, y: res.cy };
               }
             }
@@ -1631,10 +1630,9 @@ async function observeTab(tabId?: number | null): Promise<TabObservation> {
           const tag = el.tagName.toLowerCase();
           const role = el.getAttribute("role") || tag;
           const index = elements.length;
-          try {
-            el.setAttribute("data-relay-index", String(index));
-          } catch {}
-          const selector = buildSelector(el) || `[data-relay-index="${index}"]`;
+          // BUG-011 fix: Build selector without stamping DOM
+          // Use stable selectors (ID, unique attributes) or nth-child
+          const selector = buildSelector(el) || `${tag}:nth-of-type(${index + 1})`;
           const href = tag === "a" ? (el as HTMLAnchorElement).href : undefined;
           const dedupeKey = `${tag}:${label}:${selector}`;
           if (seenLabels.has(dedupeKey)) continue;

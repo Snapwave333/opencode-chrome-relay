@@ -133,6 +133,12 @@ async function tryConnectBroker(url: string, timeoutMs = 1500): Promise<WebSocke
     }, timeoutMs);
 
     ws.on("open", () => {
+      // Send auth token on connection
+      const token = loadAuthToken();
+      if (token) {
+        ws.send(JSON.stringify({ auth_token: token }));
+      }
+      
       if (!settled) {
         settled = true;
         clearTimeout(timer);
@@ -148,6 +154,33 @@ async function tryConnectBroker(url: string, timeoutMs = 1500): Promise<WebSocke
       }
     });
   });
+}
+
+function loadAuthToken(): string {
+  // Check environment variable first
+  if (process.env.RELAY_AUTH_TOKEN) {
+    return process.env.RELAY_AUTH_TOKEN;
+  }
+
+  // Try to read from config file
+  try {
+    let configDir: string;
+    if (process.platform === 'win32') {
+      configDir = path.join(process.env.APPDATA || path.join(require('os').homedir(), 'AppData', 'Roaming'), 'opencode-relay');
+    } else {
+      const xdgConfig = process.env.XDG_CONFIG_HOME || path.join(require('os').homedir(), '.config');
+      configDir = path.join(xdgConfig, 'opencode-relay');
+    }
+    
+    const tokenFile = path.join(configDir, 'auth-token');
+    if (fs.existsSync(tokenFile)) {
+      return fs.readFileSync(tokenFile, 'utf-8').trim();
+    }
+  } catch {
+    // Silently fail
+  }
+
+  return "";
 }
 
 export async function ensureBrokerConnected(url = DEFAULT_BROKER_URL): Promise<WebSocket> {

@@ -73,23 +73,28 @@ async fn test_connection(url: &str, token: Option<&str>) -> Result<bool, Box<dyn
         }
     }
     
-    // Wait for server response or connection close
+    // Wait for server response
     match timeout(Duration::from_millis(1000), stream.next()).await {
         Ok(Some(Ok(Message::Text(text)))) => {
-            // Check if it's an error response
-            if text.contains("unauthorized") || text.contains("invalid") || text.contains("auth") {
-                return Ok(false); // Explicit rejection
+            // Parse the response
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
+                // Check for auth success
+                if parsed.get("event").and_then(|e| e.as_str()) == Some("bridge.connected") &&
+                   parsed.get("status").and_then(|s| s.as_str()) == Some("authenticated") {
+                    return Ok(true); // Authenticated!
+                }
+                // Check for explicit error
+                if parsed.get("error").is_some() {
+                    return Ok(false); // Rejected
+                }
             }
-            Ok(true) // Got a message, assume accepted
+            // Got some other message - unclear, assume rejected
+            Ok(false)
         }
         Ok(Some(Ok(Message::Close(_)))) => Ok(false), // Server closed = rejected
-        Ok(Some(Ok(_))) => Ok(true), // Other message types
+        Ok(Some(Ok(_))) => Ok(false), // Other message types = unexpected
         Ok(Some(Err(_))) => Ok(false), // Error = rejected
         Ok(None) => Ok(false), // Connection closed = rejected
-        Err(_) => {
-            // Timeout - if no token was sent, assume rejection
-            // If token was sent, could be accepted but no immediate message
-            Ok(token.is_some())
-        }
+        Err(_) => Ok(false), // Timeout = rejected (no token was sent or invalid)
     }
 }

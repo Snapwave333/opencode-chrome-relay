@@ -265,7 +265,12 @@ impl Scheduler {
         verified: bool,
         outcome_json: &str,
     ) -> Result<(), String> {
-        // Sanitize and purge screenshots right after use
+        // BUG-012 mitigation: Sanitize and purge screenshots right after use
+        // Note: Screenshot base64 still arrives via WebSocket (can't avoid without
+        // changing extension to write temp files). This prevents database bloat
+        // by purging before SQLite write, but memory spike still occurs during
+        // WebSocket receive. Full fix would require extension writing screenshots
+        // to temp files and only sending file paths.
         let sanitized_outcome =
             if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(outcome_json) {
                 // Delete screenshot from disk if temporary file path was passed

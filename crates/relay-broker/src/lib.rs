@@ -271,25 +271,6 @@ mod tests {
     }
 
     #[test]
-    fn test_broker_auth_enforcement() {
-        // Test that empty token is rejected at startup
-        // The main.rs enforces: if token.is_empty() { exit(1) }
-        // The server.rs enforces: authenticated starts as false
-        
-        let empty_token = "";
-        let valid_token = "test-secret-token-with-32-chars!";
-        
-        // Empty token should cause broker to exit (checked in main.rs)
-        assert!(empty_token.is_empty());
-        
-        // Valid token must be reasonably long
-        assert!(valid_token.len() >= 8);
-        
-        // In actual server, authenticated = false initially and requires token match
-        // This is verified by integration test or manual testing
-    }
-
-    #[test]
     fn test_mutex_poison_recovery() {
         use std::sync::{Arc, Mutex};
         use std::thread;
