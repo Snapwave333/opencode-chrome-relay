@@ -27,3 +27,11 @@ playwright-report/
 scratch/
 /*.png
 
+# Security: Extension private key must not be committed
+apps/chrome-extension/extension_key.pem
+
+# Security: Auth tokens and API keys
+.env
+*.key
+*-token
+auth-token

@@ -3,8 +3,6 @@ import { TabManager } from "./tab_manager.js";
 import { CDPController } from "./cdp_controller.js";
 import { ProtocolEnvelope, ActionPayload } from "@opencode/chrome-relay-protocol";
 
-declare const __NVIDIA_API_KEY__: string | undefined;
-
 const nativePort = new NativeBridgePort();
 const tabManager = new TabManager();
 const cdp = new CDPController();
@@ -84,11 +82,16 @@ nativePort.onMessage(async (msg: ProtocolEnvelope) => {
       if (handledIdempotencyKeys.has(msg.idempotency_key)) {
         return;
       }
-      handledIdempotencyKeys.add(msg.idempotency_key);
-      if (handledIdempotencyKeys.size > 500) {
-        const first = handledIdempotencyKeys.values().next().value;
-        if (first) handledIdempotencyKeys.delete(first);
+      
+      // Maintain bounded size by trimming oldest entries (BUG-006 fix)
+      const MAX_CACHE_SIZE = 500;
+      if (handledIdempotencyKeys.size >= MAX_CACHE_SIZE) {
+        // Remove oldest 100 entries to avoid frequent trimming
+        const toDelete = Array.from(handledIdempotencyKeys).slice(0, 100);
+        toDelete.forEach(key => handledIdempotencyKeys.delete(key));
       }
+      
+      handledIdempotencyKeys.add(msg.idempotency_key);
     }
     await handleActionRequest(msg);
   } else if (
@@ -1809,9 +1812,8 @@ const ACTIVE_NIM_MODELS = [
 ];
 
 async function getNvidiaApiKey(): Promise<string> {
-  if (typeof __NVIDIA_API_KEY__ !== "undefined" && __NVIDIA_API_KEY__) {
-    return __NVIDIA_API_KEY__;
-  }
+  // BUG-003 fix: API keys must NEVER be embedded in extension code
+  // Users must configure their own key in extension settings
   try {
     const stored = await chrome.storage.local.get("nvidia_api_key");
     if (stored?.nvidia_api_key) return stored.nvidia_api_key;
@@ -2062,7 +2064,7 @@ async function handleUserChat(
       broadcastChatResponse(
         runId,
         epoch,
-        "Pong! Relay agent is online, but NVIDIA_API_KEY is not configured in the build or extension storage.",
+        "Please configure your NVIDIA API key in extension settings to use the built-in chat agent.",
         "local"
       );
       return;

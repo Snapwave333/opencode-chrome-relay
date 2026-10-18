@@ -1,6 +1,14 @@
 use crate::protocol::ExecutionState;
-use rusqlite::{params, Connection, Result};
-use std::sync::{Arc, Mutex};
+use rusqlite::{params, Connection, OptionalExtension, Result};
+use std::sync::{Arc, Mutex, PoisonError};
+
+// Helper to handle poisoned mutex gracefully
+fn handle_poison<T>(err: PoisonError<T>) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        format!("Database connection mutex poisoned: {}", err),
+    )))
+}
 
 #[derive(Clone)]
 pub struct Database {
@@ -27,7 +35,7 @@ impl Database {
     }
 
     fn init_tables(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(handle_poison)?;
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS runs (
@@ -107,7 +115,7 @@ impl Database {
         origin_scope: Option<&str>,
         is_pinned: bool,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(handle_poison)?;
         let now = chrono::Utc::now().to_rfc3339();
         let state_str = serde_json::to_string(&state).unwrap().replace('\"', "");
 
@@ -138,7 +146,7 @@ impl Database {
     }
 
     pub fn set_run_pinned(&self, run_id: &str, is_pinned: bool) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(handle_poison)?;
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
             "UPDATE runs SET is_pinned = ?1, updated_at = ?2 WHERE run_id = ?3",
@@ -148,7 +156,7 @@ impl Database {
     }
 
     pub fn delete_run(&self, run_id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(handle_poison)?;
         conn.execute(
             "DELETE FROM action_journal WHERE run_id = ?1",
             params![run_id],
@@ -164,7 +172,7 @@ impl Database {
     }
 
     pub fn cleanup_unpinned_runs(&self) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(handle_poison)?;
         // Collect unpinned run_ids
         let mut stmt = conn.prepare("SELECT run_id FROM runs WHERE is_pinned = 0")?;
         let run_ids: Vec<String> = stmt
@@ -190,7 +198,7 @@ impl Database {
     }
 
     pub fn update_run_state(&self, run_id: &str, state: ExecutionState, epoch: u64) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(handle_poison)?;
         let now = chrono::Utc::now().to_rfc3339();
         let state_str = serde_json::to_string(&state).unwrap().replace('\"', "");
 
@@ -210,7 +218,7 @@ impl Database {
         action_type: &str,
         payload_json: &str,
     ) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(handle_poison)?;
         let now = chrono::Utc::now().to_rfc3339();
 
         // Check if already exists
@@ -243,7 +251,7 @@ impl Database {
         verified: bool,
         outcome_json: &str,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(handle_poison)?;
         let now = chrono::Utc::now().to_rfc3339();
         let status = if success { "finished" } else { "failed" };
 
@@ -266,7 +274,7 @@ impl Database {
         page_title: Option<&str>,
         serialized_state: &str,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(handle_poison)?;
         let now = chrono::Utc::now().to_rfc3339();
 
         conn.execute(
@@ -290,38 +298,64 @@ impl Database {
         run_id: &str,
         duration_secs: u64,
     ) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(handle_poison)?;
         let now = chrono::Utc::now();
         let now_str = now.to_rfc3339();
         let expires_at = (now + chrono::Duration::seconds(duration_secs as i64)).to_rfc3339();
 
-        // Check current lease
-        let mut stmt =
-            conn.prepare("SELECT owner_run_id, expires_at FROM tab_leases WHERE tab_id = ?1")?;
-        let mut rows = stmt.query(params![tab_id])?;
-        if let Some(row) = rows.next()? {
-            let owner: String = row.get(0)?;
-            let exp_str: String = row.get(1)?;
-            if owner != run_id && exp_str > now_str {
-                // Active lease owned by another run
-                return Ok(false);
-            }
+        // Use atomic transaction with immediate mode to prevent TOCTOU race
+        conn.execute("BEGIN IMMEDIATE", [])?;
+
+        // Try to update existing lease if we own it or it's expired
+        let updated = conn.execute(
+            "UPDATE tab_leases 
+             SET lease_id = ?1, owner_run_id = ?2, expires_at = ?3
+             WHERE tab_id = ?4 AND (owner_run_id = ?2 OR expires_at < ?5)",
+            params![lease_id, run_id, expires_at, tab_id, now_str],
+        )?;
+
+        if updated > 0 {
+            conn.execute("COMMIT", [])?;
+            return Ok(true);
         }
 
+        // Check if another run holds a valid lease
+        let conflict: Option<String> = conn
+            .query_row(
+                "SELECT owner_run_id FROM tab_leases WHERE tab_id = ?1 AND expires_at >= ?2",
+                params![tab_id, now_str],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        if conflict.is_some() {
+            conn.execute("ROLLBACK", [])?;
+            return Ok(false);
+        }
+
+        // No existing lease, insert new one
         conn.execute(
             "INSERT INTO tab_leases (lease_id, tab_id, owner_run_id, expires_at, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(tab_id) DO UPDATE SET
-                lease_id = excluded.lease_id,
-                owner_run_id = excluded.owner_run_id,
-                expires_at = excluded.expires_at;",
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![lease_id, tab_id, run_id, expires_at, now_str],
         )?;
+
+        conn.execute("COMMIT", [])?;
         Ok(true)
     }
 
+    pub fn cleanup_expired_leases(&self) -> Result<usize> {
+        let conn = self.conn.lock().map_err(handle_poison)?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let deleted = conn.execute(
+            "DELETE FROM tab_leases WHERE expires_at < ?1",
+            params![now],
+        )?;
+        Ok(deleted)
+    }
+
     pub fn release_tab_lease(&self, tab_id: i64, run_id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(handle_poison)?;
         conn.execute(
             "DELETE FROM tab_leases WHERE tab_id = ?1 AND owner_run_id = ?2",
             params![tab_id, run_id],
