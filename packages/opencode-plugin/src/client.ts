@@ -21,6 +21,7 @@ export class RelayBrokerClient {
   private tabId: number | null = null;
   private leaseId: string | null = null;
   private eventHandlers: Map<string, ((payload: any) => void)[]> = new Map();
+  private pendingRejects: Set<(err: Error) => void> = new Set();
 
   constructor(options: RelayClientOptions = {}) {
     this.brokerUrl = options.brokerUrl || process.env.RELAY_BROKER_URL || "ws://127.0.0.1:4098";
@@ -68,13 +69,22 @@ export class RelayBrokerClient {
           finish(err);
         });
 
-        this.ws.on("close", () => {
+        const socket = this.ws;
+        socket.on("close", () => {
           if (!settled) finish(new Error("Relay broker closed before authentication completed"));
+          if (this.ws === socket) this.ws = null;
+          const rejects = [...this.pendingRejects];
+          this.pendingRejects.clear();
+          rejects.forEach((rejectPending) => rejectPending(new Error("Relay broker connection closed")));
         });
       } catch (err) {
         reject(err instanceof Error ? err : new Error(String(err)));
       }
     });
+  }
+
+  public isConnected(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN;
   }
 
   public disconnect(): void {
@@ -96,7 +106,7 @@ export class RelayBrokerClient {
       if (handlers) {
         handlers.forEach((fn) => fn(data));
       }
-      if (data.event === "run.state_changed" && data.payload?.new_state) {
+      if (data.event === "run.state_changed" && data.payload?.new_state && data.run_id === this.runId) {
         if (data.epoch !== undefined) {
           this.epoch = data.epoch;
         }
@@ -124,29 +134,41 @@ export class RelayBrokerClient {
     };
 
     return new Promise((resolve, reject) => {
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      const ws = this.ws;
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
         return reject(new Error("Relay broker WebSocket is not connected"));
       }
 
+      const settle = () => {
+        clearTimeout(timeout);
+        ws.off("message", responseHandler);
+        this.pendingRejects.delete(onClosed);
+      };
+      const onClosed = (err: Error) => {
+        settle();
+        reject(err);
+      };
+
       const timeout = setTimeout(() => {
+        settle();
         reject(new Error(`Action timeout waiting for broker response (${action.type})`));
-      }, Math.max(action.timeout_ms || 30000, 10000));
+      }, Math.max(action.timeout_ms || 30000, 10000) + 5000);
 
       const responseHandler = (data: WebSocket.RawData) => {
         try {
           const parsed = JSON.parse(data.toString());
           if (parsed.idempotency_key === idempotencyKey) {
             if (parsed.event === "action.finished") {
-              clearTimeout(timeout);
-              this.ws?.off("message", responseHandler);
+              settle();
               resolve(parsed.payload || parsed);
             } else if (parsed.event === "action.failed" || parsed.error) {
-              clearTimeout(timeout);
-              this.ws?.off("message", responseHandler);
+              settle();
               reject(new Error(parsed.payload?.error || parsed.error || "Action execution failed"));
+            } else if (parsed.event === "action.started" && parsed.payload?.is_forbidden) {
+              settle();
+              reject(new Error(parsed.payload?.reason || "Action forbidden by policy"));
             } else if (parsed.event === "approval.requested") {
-              clearTimeout(timeout);
-              this.ws?.off("message", responseHandler);
+              settle();
               resolve({
                 requires_approval: true,
                 reason: parsed.payload?.reason,
@@ -159,8 +181,9 @@ export class RelayBrokerClient {
         }
       };
 
-      this.ws.on("message", responseHandler);
-      this.ws.send(JSON.stringify(envelope));
+      this.pendingRejects.add(onClosed);
+      ws.on("message", responseHandler);
+      ws.send(JSON.stringify(envelope));
     });
   }
 
@@ -173,11 +196,23 @@ export class RelayBrokerClient {
     };
 
     return new Promise((resolve, reject) => {
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      const ws = this.ws;
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
         return reject(new Error("Relay broker WebSocket is not connected"));
       }
 
+      const settle = () => {
+        clearTimeout(timeout);
+        ws.off("message", responseHandler);
+        this.pendingRejects.delete(onClosed);
+      };
+      const onClosed = (err: Error) => {
+        settle();
+        reject(err);
+      };
+
       const timeout = setTimeout(() => {
+        settle();
         reject(new Error(`Control command timeout (${command})`));
       }, 5000);
 
@@ -185,15 +220,13 @@ export class RelayBrokerClient {
         try {
           const parsed = JSON.parse(data.toString());
           if (parsed.event === "run.state_changed" && parsed.run_id === this.runId) {
-            clearTimeout(timeout);
-            this.ws?.off("message", responseHandler);
+            settle();
             if (parsed.epoch !== undefined) {
               this.epoch = parsed.epoch;
             }
             resolve(parsed.payload);
           } else if (parsed.error && parsed.run_id === this.runId) {
-            clearTimeout(timeout);
-            this.ws?.off("message", responseHandler);
+            settle();
             reject(new Error(parsed.error));
           }
         } catch {
@@ -201,8 +234,9 @@ export class RelayBrokerClient {
         }
       };
 
-      this.ws.on("message", responseHandler);
-      this.ws.send(JSON.stringify(cmd));
+      this.pendingRejects.add(onClosed);
+      ws.on("message", responseHandler);
+      ws.send(JSON.stringify(cmd));
     });
   }
 

@@ -2,7 +2,7 @@
 import WebSocket from "ws";
 import fs from "node:fs";
 import path from "node:path";
-import { spawn, execSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { ActionPayload, BrowserActionType } from "@opencode/chrome-relay-protocol";
 import {
@@ -132,12 +132,33 @@ async function tryConnectBroker(url: string, timeoutMs = 1500): Promise<WebSocke
       }
     }, timeoutMs);
 
-    ws.on("open", () => {
-      if (!settled) {
-        settled = true;
-        clearTimeout(timer);
-        resolve(ws);
+    const finish = (result: WebSocket | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (!result) {
+        try {
+          ws.terminate();
+        } catch {}
       }
+      resolve(result);
+    };
+
+    ws.on("open", () => {
+      const authToken = process.env.RELAY_AUTH_TOKEN;
+      if (!authToken) {
+        finish(ws);
+        return;
+      }
+      ws.once("message", (data: WebSocket.RawData) => {
+        try {
+          const reply = JSON.parse(data.toString());
+          finish(reply.event === "bridge.connected" ? ws : null);
+        } catch {
+          finish(null);
+        }
+      });
+      ws.send(JSON.stringify({ auth_token: authToken }));
     });
 
     ws.on("error", () => {
@@ -1267,12 +1288,18 @@ export async function runCli(argv = process.argv.slice(2), existingWs?: WebSocke
   }
 }
 
+function resolveRealPath(target: string): string {
+  try {
+    return fs.realpathSync(target);
+  } catch {
+    return path.resolve(target);
+  }
+}
+
 const isMain =
   process.argv[1] &&
-  (path.resolve(process.argv[1]) === path.resolve(__filename) ||
-    process.argv[1].endsWith("browser-relay") ||
-    process.argv[1].endsWith("oc-relay") ||
-    process.argv[1].endsWith("cli.js"));
+  (resolveRealPath(process.argv[1]) === resolveRealPath(__filename) ||
+    /(^|[\\/])(browser-relay|oc-relay)(\.cmd|\.ps1)?$/.test(process.argv[1]));
 
 if (isMain) {
   runCli().catch((err) => {

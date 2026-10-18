@@ -188,7 +188,7 @@ export const browserTools: Record<string, ToolDefinition> = {
       return client.sendAction({
         type: "browser_pdf",
         download_path: args.pdf_path,
-        risk: "read_only",
+        risk: args.pdf_path ? "external_effect" : "read_only",
         is_irreversible: false,
       });
     },
@@ -463,7 +463,7 @@ export const browserTools: Record<string, ToolDefinition> = {
         type: "browser_upload",
         file_paths: args.file_paths,
         locator: { selector: args.selector || "input[type='file']" },
-        risk: "non_sensitive_mutation",
+        risk: "sensitive_action",
         is_irreversible: false,
       });
     },

@@ -78,7 +78,44 @@ if ($wsh.AppActivate('Save As') -or $wsh.AppActivate('Save') -or $wsh.AppActivat
     const res = runPowerShellScript(script, 2500);
     return res.includes("YES");
   }
+  if (process.platform === "linux") {
+    return findLinuxDialogWindow() !== null;
+  }
+  if (process.platform === "darwin") {
+    return macChromeSheetOpen();
+  }
   return false;
+}
+
+const LINUX_DIALOG_TITLE_PATTERN = "^(Save|Save As|Save File|Open|Open File|Select File|Download).*";
+
+function findLinuxDialogWindow(): string | null {
+  try {
+    const out = execFileSync(
+      "xdotool",
+      ["search", "--onlyvisible", "--name", LINUX_DIALOG_TITLE_PATTERN],
+      { timeout: 2000, encoding: "utf8" }
+    );
+    return out.split(/\s+/).find(Boolean) || null;
+  } catch {
+    return null;
+  }
+}
+
+function macChromeSheetOpen(): boolean {
+  try {
+    const out = execFileSync(
+      "osascript",
+      [
+        "-e",
+        'tell application "System Events" to tell (first process whose frontmost is true) to return (exists sheet 1 of window 1)',
+      ],
+      { timeout: 2000, encoding: "utf8" }
+    );
+    return out.trim() === "true";
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -89,7 +126,7 @@ export function dismissNativeSaveDialog(options: NativeDialogOptions = {}): Nati
   const action = options.action || "save";
 
   if (process.platform === "win32") {
-    const escapedFilename = (options.filename || "").replace(/["'\\]/g, "");
+    const escapedFilename = (options.filename || "").replace(/[\r\n\0]/g, "").replace(/'/g, "''");
     const script = `
 $ProgressPreference = 'SilentlyContinue'
 Add-Type -AssemblyName UIAutomationClient
@@ -215,6 +252,9 @@ try {
   }
 
   if (process.platform === "darwin") {
+    if (!macChromeSheetOpen()) {
+      return { dismissed: false, dialogFound: false, actionTaken: "none" };
+    }
     try {
       const key = action === "cancel" ? "key code 53" : "keystroke return";
       execFileSync("osascript", ["-e", `tell application "System Events" to ${key}`], {
@@ -228,8 +268,14 @@ try {
 
   if (process.platform === "linux") {
     try {
+      const windowId = findLinuxDialogWindow();
+      if (!windowId) {
+        return { dismissed: false, dialogFound: false, actionTaken: "none" };
+      }
       const key = action === "cancel" ? "Escape" : "Return";
-      execFileSync("xdotool", ["key", key], { timeout: 2500 });
+      execFileSync("xdotool", ["windowactivate", "--sync", windowId, "key", "--window", windowId, key], {
+        timeout: 2500,
+      });
       return { dismissed: true, dialogFound: true, actionTaken: action === "cancel" ? "cancelled" : "saved" };
     } catch {
       return { dismissed: false, dialogFound: false, actionTaken: "none" };

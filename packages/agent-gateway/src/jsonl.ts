@@ -20,6 +20,10 @@ export async function runJsonlGateway(): Promise<void> {
       process.stdout.write(`${JSON.stringify({ ok: false, error: "Invalid JSON" })}\n`);
       continue;
     }
+    if (!request || typeof request !== "object" || Array.isArray(request)) {
+      process.stdout.write(`${JSON.stringify({ ok: false, error: "Request must be a JSON object" })}\n`);
+      continue;
+    }
 
     try {
       const result = await dispatchJsonlRequest(gateway, request);

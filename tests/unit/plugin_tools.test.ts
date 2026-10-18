@@ -49,7 +49,7 @@ describe("OpenCode Plugin Browser Tools", () => {
       type: "browser_upload",
       file_paths: ["C:/test.pdf"],
       locator: { selector: "#file-input" },
-      risk: "non_sensitive_mutation",
+      risk: "sensitive_action",
       is_irreversible: false,
     });
   });

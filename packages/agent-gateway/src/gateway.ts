@@ -152,7 +152,9 @@ export class AgentGateway {
   }
 
   private async ensureConnected(): Promise<void> {
-    if (this.connected) return;
+    const liveness = (this.client as { isConnected?: () => boolean }).isConnected?.();
+    if (this.connected && liveness !== false) return;
+    this.connected = false;
     if (!this.connectionAttempt) {
       this.connectionAttempt = this.client
         .connect()
