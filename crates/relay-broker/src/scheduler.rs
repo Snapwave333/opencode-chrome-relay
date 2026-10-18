@@ -17,9 +17,15 @@ pub struct Scheduler {
 
 impl Scheduler {
     pub fn new(db: Database) -> Self {
+        let persisted: HashMap<String, RunSession> = db
+            .load_runs()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|session| (session.run_id.clone(), session))
+            .collect();
         Scheduler {
             db,
-            sessions: Arc::new(Mutex::new(HashMap::new())),
+            sessions: Arc::new(Mutex::new(persisted)),
             allowed_origins: Arc::new(Mutex::new(vec!["*".to_string()])),
             auth_mode: Arc::new(Mutex::new(AuthorizationMode::Assist)),
         }
@@ -45,19 +51,30 @@ impl Scheduler {
         let session_name = name
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("Session {}", run_id.chars().take(8).collect::<String>()));
-        let session = RunSession::with_name(run_id.to_string(), session_name.clone());
+        let session = match map.get_mut(run_id) {
+            Some(existing) => {
+                if name.is_some() {
+                    existing.name = session_name.clone();
+                }
+                existing.clone()
+            }
+            None => {
+                let created = RunSession::with_name(run_id.to_string(), session_name.clone());
+                map.insert(run_id.to_string(), created.clone());
+                created
+            }
+        };
         let _ = self.db.create_or_update_run(
             run_id,
-            Some(&session_name),
+            Some(&session.name),
             None,
             None,
+            session.tab_id,
+            session.state.clone(),
+            session.epoch,
             None,
-            ExecutionState::Ready,
-            0,
-            None,
-            false,
+            session.is_pinned,
         );
-        map.insert(run_id.to_string(), session.clone());
         session
     }
 

@@ -302,4 +302,40 @@ mod tests {
         assert_eq!(back["testId"], "submit-btn");
         assert_eq!(back["index"], 3);
     }
+
+    #[test]
+    fn test_sessions_survive_broker_restart_with_pin_and_epoch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay.sqlite");
+        let path = path.to_str().unwrap();
+        {
+            let scheduler = Scheduler::new(Database::new(path).unwrap());
+            scheduler.create_session("run_keep", Some("Keeper"));
+            scheduler.set_session_pinned("run_keep", true).unwrap();
+            let ctrl = ControlCommand {
+                command: ControlType::Stop,
+                run_id: "run_keep".into(),
+                epoch: 0,
+                instruction: None,
+                restart_options: None,
+                reason: None,
+            };
+            scheduler.handle_control(&ctrl).unwrap();
+        }
+        let scheduler = Scheduler::new(Database::new(path).unwrap());
+        let restored = scheduler
+            .list_sessions()
+            .into_iter()
+            .find(|s| s.run_id == "run_keep")
+            .expect("pinned run restored");
+        assert!(restored.is_pinned);
+        assert_eq!(restored.epoch, 1);
+        assert_eq!(restored.name, "Keeper");
+        assert_eq!(restored.state, ExecutionState::Stopped);
+        assert!(restored.can_admit_action(0).is_err());
+
+        let recreated = scheduler.create_session("run_keep", None);
+        assert!(recreated.is_pinned);
+        assert_eq!(recreated.epoch, 1);
+    }
 }

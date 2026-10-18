@@ -1,4 +1,5 @@
 use crate::protocol::ExecutionState;
+use crate::state_machine::RunSession;
 use rusqlite::{params, Connection, Result};
 use std::sync::{Arc, Mutex};
 
@@ -144,6 +145,29 @@ impl Database {
             ],
         )?;
         Ok(())
+    }
+
+    pub fn load_runs(&self) -> Result<Vec<RunSession>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT run_id, name, tab_id, current_state, epoch, is_pinned FROM runs ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let run_id: String = row.get(0)?;
+            let name: Option<String> = row.get(1)?;
+            let state_str: String = row.get(3)?;
+            let mut session = match name {
+                Some(name) => RunSession::with_name(run_id.clone(), name),
+                None => RunSession::new(run_id.clone()),
+            };
+            session.tab_id = row.get(2)?;
+            session.state = serde_json::from_value(serde_json::Value::String(state_str))
+                .unwrap_or(ExecutionState::Ready);
+            session.epoch = row.get::<_, i64>(4)?.max(0) as u64;
+            session.is_pinned = row.get::<_, i64>(5)? != 0;
+            Ok(session)
+        })?;
+        rows.collect()
     }
 
     pub fn set_run_pinned(&self, run_id: &str, is_pinned: bool) -> Result<()> {

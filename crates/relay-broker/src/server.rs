@@ -183,8 +183,7 @@ async fn handle_connection(
                                             }
                                         });
                                         let resp_str = resp.to_string();
-                                        let _ = event_tx.send(resp_str.clone());
-                                        ws_sender.send(Message::Text(resp_str)).await?;
+                                        let _ = event_tx.send(resp_str);
                                     }
                                     Err(err) => {
                                         let err_resp = serde_json::json!({
@@ -208,8 +207,7 @@ async fn handle_connection(
                                                 "payload": { "error": policy.reason, "is_forbidden": true }
                                             });
                                             let resp_str = err_resp.to_string();
-                                            let _ = event_tx.send(resp_str.clone());
-                                            ws_sender.send(Message::Text(resp_str)).await?;
+                                            let _ = event_tx.send(resp_str);
                                         }
                                         Ok(policy) => {
                                             let resp = serde_json::json!({
@@ -230,8 +228,7 @@ async fn handle_connection(
                                                 }
                                             });
                                             let resp_str = resp.to_string();
-                                            let _ = event_tx.send(resp_str.clone());
-                                            ws_sender.send(Message::Text(resp_str)).await?;
+                                            let _ = event_tx.send(resp_str);
                                         }
                                         Err(err) => {
                                             let err_resp = serde_json::json!({
@@ -244,7 +241,6 @@ async fn handle_connection(
                                                 "payload": { "error": err }
                                             });
                                             let _ = event_tx.send(err_resp.to_string());
-                                            ws_sender.send(Message::Text(err_resp.to_string())).await?;
                                         }
                                     }
                                 } else if envelope.event == "action.started" {
@@ -295,8 +291,7 @@ async fn handle_connection(
                                         }
                                     });
                                     let resp_str = resp.to_string();
-                                    let _ = event_tx.send(resp_str.clone());
-                                    ws_sender.send(Message::Text(resp_str)).await?;
+                                    let _ = event_tx.send(resp_str);
                                 } else if envelope.event == "session.delete" {
                                     if let Some(run_id) = envelope.run_id {
                                         let _ = scheduler.delete_session(&run_id);
@@ -308,8 +303,7 @@ async fn handle_connection(
                                             "payload": { "run_id": run_id }
                                         });
                                         let resp_str = resp.to_string();
-                                        let _ = event_tx.send(resp_str.clone());
-                                        ws_sender.send(Message::Text(resp_str)).await?;
+                                        let _ = event_tx.send(resp_str);
                                     }
                                 } else if envelope.event == "session.pin" {
                                     if let Some(run_id) = envelope.run_id {
@@ -323,8 +317,7 @@ async fn handle_connection(
                                             "payload": { "run_id": run_id, "is_pinned": is_pinned }
                                         });
                                         let resp_str = resp.to_string();
-                                        let _ = event_tx.send(resp_str.clone());
-                                        ws_sender.send(Message::Text(resp_str)).await?;
+                                        let _ = event_tx.send(resp_str);
                                     }
                                 } else if envelope.event == "session.close" {
                                     if let Some(run_id) = envelope.run_id {
@@ -338,8 +331,7 @@ async fn handle_connection(
                                             "payload": { "run_id": run_id, "deleted": deleted }
                                         });
                                         let resp_str = resp.to_string();
-                                        let _ = event_tx.send(resp_str.clone());
-                                        ws_sender.send(Message::Text(resp_str)).await?;
+                                        let _ = event_tx.send(resp_str);
                                     }
                                 } else if envelope.event == "session.list" {
                                     let sessions = scheduler.list_sessions();
