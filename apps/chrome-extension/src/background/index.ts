@@ -579,39 +579,23 @@ async function handleActionRequest(
               : null;
 
             if (targetIndex !== null) {
-              // Reconstruct interactive elements without relying on DOM attributes
-              const selectorQuery =
-                'button, a[href], input:not([type="hidden"]), select, textarea, [role="button"], [role="menuitem"], [role="option"], [role="tab"], [role="checkbox"], mat-select, mat-option, summary, [tabindex="0"]';
-              const dialogElements: Element[] = [];
-              for (const d of activeDialogs) {
-                dialogElements.push(...Array.from(d.querySelectorAll(selectorQuery)).filter(isVisible));
+              // BUG-011 fix: Try to get element from cache stored by observeTab
+              const ELEMENT_CACHE_KEY = Symbol.for('__opencode_relay_elements__');
+              const cache = (window as any)[ELEMENT_CACHE_KEY];
+              
+              if (cache && cache.elements && Date.now() - cache.timestamp < 10000) {
+                // Cache is fresh (< 10 seconds old), use it
+                const el = cache.elements[targetIndex];
+                if (el && document.contains(el) && isVisible(el)) {
+                  return triggerClick(el as HTMLElement);
+                }
               }
-              const pageElements = Array.from(document.querySelectorAll(selectorQuery)).filter(isVisible);
-              const rawEls = Array.from(new Set([...dialogElements, ...pageElements]));
-
-              const validEls: HTMLElement[] = [];
-              const seen = new Set<string>();
-              for (const el of rawEls) {
-                if (validEls.length >= 120) break;
-                const aria = (el.getAttribute("aria-label") || "").trim();
-                const placeholder = (el.getAttribute("placeholder") || "").trim();
-                const title = (el.getAttribute("title") || "").trim();
-                const text = ((el as HTMLElement).innerText || el.textContent || "").replace(/\s+/g, " ").trim();
-                const label = (aria || text || placeholder || title).slice(0, 80);
-                if (!label) continue;
-                const tag = el.tagName.toLowerCase();
-                const dedupeKey = `${tag}:${label}`;
-                if (seen.has(dedupeKey)) continue;
-                seen.add(dedupeKey);
-                validEls.push(el as HTMLElement);
-              }
-
-              if (targetIndex >= 0 && targetIndex < validEls.length) {
-                return triggerClick(validEls[targetIndex]);
-              }
+              
+              // Cache miss or stale - this shouldn't happen in normal flow
+              // Agent should call observe before click, but handle gracefully
               return {
                 ok: false,
-                error: `Element index [${targetIndex}] not found on page (found ${validEls.length} interactive elements). Run 'browser-relay snapshot' to view updated elements.`,
+                error: `Element index ${targetIndex} not found. The page may have changed - please run 'browser_snapshot' again.`,
               };
             }
 
@@ -771,33 +755,25 @@ async function handleActionRequest(
               ? loc.index
               : null;
 
-            // BUG-011: Removed data-relay-index stamping
+            // BUG-011 fix: Retrieve element from cache
             if (targetIndex !== null) {
-              // Reconstruct elements without relying on DOM attributes
-              const selectorQuery =
-                'button, a[href], input:not([type="hidden"]), select, textarea, [role="button"], [role="menuitem"], [role="option"], [role="tab"], [role="checkbox"], mat-select, mat-option, summary, [tabindex="0"]';
-              const rawEls = Array.from(document.querySelectorAll(selectorQuery)).filter(isVisible);
-              const validEls: HTMLElement[] = [];
-              const seen = new Set<string>();
-              for (const el of rawEls) {
-                if (validEls.length >= 120) break;
-                const aria = (el.getAttribute("aria-label") || "").trim();
-                const placeholder = (el.getAttribute("placeholder") || "").trim();
-                const title = (el.getAttribute("title") || "").trim();
-                const t = ((el as HTMLElement).innerText || el.textContent || "").replace(/\s+/g, " ").trim();
-                const label = (aria || t || placeholder || title).slice(0, 80);
-                if (!label) continue;
-                const tag = el.tagName.toLowerCase();
-                const dedupeKey = `${tag}:${label}`;
-                if (seen.has(dedupeKey)) continue;
-                seen.add(dedupeKey);
-                validEls.push(el as HTMLElement);
+              const ELEMENT_CACHE_KEY = Symbol.for('__opencode_relay_elements__');
+              const cache = (window as any)[ELEMENT_CACHE_KEY];
+              
+              if (cache && cache.elements && Date.now() - cache.timestamp < 10000) {
+                const el = cache.elements[targetIndex];
+                if (el && document.contains(el)) {
+                  target = (el.matches('input:not([type="hidden"]), textarea, [contenteditable="true"]')
+                    ? el
+                    : el.querySelector('input:not([type="hidden"]), textarea, [contenteditable="true"]')) as HTMLInputElement | null;
+                }
               }
-              if (targetIndex >= 0 && targetIndex < validEls.length) {
-                const el = validEls[targetIndex];
-                target = (el.matches('input:not([type="hidden"]), textarea, [contenteditable="true"]')
-                  ? el
-                  : el.querySelector('input:not([type="hidden"]), textarea, [contenteditable="true"]')) as HTMLInputElement | null;
+              
+              if (!target) {
+                return {
+                  ok: false,
+                  error: `Element index ${targetIndex} not found. The page may have changed - please run 'browser_snapshot' again.`,
+                };
               }
             }
 
@@ -1038,36 +1014,23 @@ async function handleActionRequest(
               ? loc.index
               : null;
 
-            // BUG-011: Removed data-relay-index stamping - reconstruct if index provided
+            // BUG-011: Removed data-relay-index stamping - retrieve from cache
             if (targetIndex !== null) {
-              const selectorQuery =
-                'button, a[href], input:not([type="hidden"]), select, textarea, [role="button"], [role="menuitem"], [role="option"], [role="tab"], [role="checkbox"], mat-select, mat-option, summary, [tabindex="0"]';
-              const dialogElements: Element[] = [];
-              for (const d of activeDialogs) {
-                dialogElements.push(...Array.from(d.querySelectorAll(selectorQuery)).filter(isVisible));
+              const ELEMENT_CACHE_KEY = Symbol.for('__opencode_relay_elements__');
+              const cache = (window as any)[ELEMENT_CACHE_KEY];
+              
+              if (cache && cache.elements && Date.now() - cache.timestamp < 10000) {
+                const el = cache.elements[targetIndex];
+                if (el && document.contains(el) && isVisible(el)) {
+                  const res = triggerHover(el as HTMLElement);
+                  return { ok: true, summary: res.summary, x: res.cx, y: res.cy };
+                }
               }
-              const pageElements = Array.from(document.querySelectorAll(selectorQuery)).filter(isVisible);
-              const rawEls = Array.from(new Set([...dialogElements, ...pageElements]));
-              const validEls: HTMLElement[] = [];
-              const seen = new Set<string>();
-              for (const el of rawEls) {
-                if (validEls.length >= 120) break;
-                const aria = (el.getAttribute("aria-label") || "").trim();
-                const placeholder = (el.getAttribute("placeholder") || "").trim();
-                const title = (el.getAttribute("title") || "").trim();
-                const text = ((el as HTMLElement).innerText || el.textContent || "").replace(/\s+/g, " ").trim();
-                const label = (aria || text || placeholder || title).slice(0, 80);
-                if (!label) continue;
-                const tag = el.tagName.toLowerCase();
-                const dedupeKey = `${tag}:${label}`;
-                if (seen.has(dedupeKey)) continue;
-                seen.add(dedupeKey);
-                validEls.push(el as HTMLElement);
-              }
-              if (targetIndex >= 0 && targetIndex < validEls.length) {
-                const res = triggerHover(validEls[targetIndex]);
-                return { ok: true, summary: res.summary, x: res.cx, y: res.cy };
-              }
+              
+              return {
+                ok: false,
+                error: `Element index ${targetIndex} not found. The page may have changed - please run 'browser_snapshot' again.`,
+              };
             }
 
             if (loc?.selector) {
@@ -1618,6 +1581,11 @@ async function observeTab(tabId?: number | null): Promise<TabObservation> {
         }> = [];
         const seenLabels = new Set<string>();
 
+        // BUG-011 fix: Store element references in a way pages can't access
+        // Use a Symbol key on window - pages can't enumerate or access this
+        const ELEMENT_CACHE_KEY = Symbol.for('__opencode_relay_elements__');
+        (window as any)[ELEMENT_CACHE_KEY] = { elements: [], timestamp: Date.now() };
+
         for (const el of rawEls) {
           if (elements.length >= 120) break;
           const aria = (el.getAttribute("aria-label") || "").trim();
@@ -1630,14 +1598,15 @@ async function observeTab(tabId?: number | null): Promise<TabObservation> {
           const tag = el.tagName.toLowerCase();
           const role = el.getAttribute("role") || tag;
           const index = elements.length;
-          // BUG-011 fix: Build selector without stamping DOM
-          // Use stable selectors (ID, unique attributes) or nth-child
-          const selector = buildSelector(el) || `${tag}:nth-of-type(${index + 1})`;
-          const href = tag === "a" ? (el as HTMLAnchorElement).href : undefined;
+          const selector = buildSelector(el) || "";
           const dedupeKey = `${tag}:${label}:${selector}`;
           if (seenLabels.has(dedupeKey)) continue;
           seenLabels.add(dedupeKey);
 
+          // Store element reference
+          (window as any)[ELEMENT_CACHE_KEY].elements.push(el);
+
+          const href = tag === "a" ? (el as HTMLAnchorElement).href : undefined;
           elements.push({
             index,
             tag,
