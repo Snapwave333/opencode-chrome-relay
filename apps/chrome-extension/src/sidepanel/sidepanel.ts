@@ -323,7 +323,7 @@ function renderChatMessages(session: SessionData): void {
   if (session.messages.length === 0) {
     const hint = document.createElement("div");
     hint.className = "empty-hint";
-    hint.innerHTML = `<span class="empty-mark">${getMaterial3Svg("explore", 26)}</span><p>Ask anything about this page.</p>`;
+    hint.innerHTML = `<p>Ask anything about this page.</p>`;
     chatMessagesContainer.appendChild(hint);
   }
 
