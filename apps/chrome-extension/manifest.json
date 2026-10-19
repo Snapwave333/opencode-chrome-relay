@@ -13,7 +13,9 @@
     "activeTab",
     "tabs",
     "downloads",
-    "management"
+    "management",
+    "history",
+    "bookmarks"
   ],
   "host_permissions": [
     "<all_urls>"

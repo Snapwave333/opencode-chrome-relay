@@ -161,6 +161,9 @@ function normalizeUrl(rawUrl: string): string {
     .replace(/[?.!,;]+$/, "")
     .trim();
 
+  if (/^(javascript|data|vbscript|blob):/i.test(cleaned)) {
+    throw new Error(`Refusing to navigate to a ${cleaned.split(":")[0]}: URL`);
+  }
   if (/^(https?|chrome|chrome-extension|file):\/\//i.test(cleaned)) return cleaned;
   if (/^localhost(:\d+)?(\/.*)?$/i.test(cleaned) || /^127\.0\.0\.1(:\d+)?(\/.*)?$/i.test(cleaned)) {
     return `http://${cleaned}`;
@@ -231,9 +234,43 @@ async function waitForTabComplete(tabId: number, timeoutMs = 4500): Promise<void
   });
 }
 
+// Actions that only read; the agent loop skips the post-action settle wait for them
+const READ_ONLY_ACTIONS = new Set([
+  "browser_extract", "browser_eval", "browser_verify", "browser_wait", "browser_screenshot",
+  "browser_snapshot", "browser_list_tabs", "browser_status", "browser_info", "browser_hover",
+]);
+
+// Turns an action outcome into text the model can use on the next step (bounded in size)
+function describeOutcomeForModel(type: string, outcome: any): string {
+  const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max)}… (${text.length - max} more chars)` : text);
+  switch (type) {
+    case "browser_extract": {
+      const x = outcome?.extracted;
+      if (!x) return "";
+      const links = (x.links || []).slice(0, 30).map((l: any) => `${l.text || "(no text)"} -> ${l.href}`).join("\n");
+      return `PAGE TEXT:\n${clip(String(x.text || ""), 6000)}${links ? `\nLINKS:\n${links}` : ""}`;
+    }
+    case "browser_eval": {
+      let text: string;
+      try {
+        text = typeof outcome?.eval_result === "string" ? outcome.eval_result : JSON.stringify(outcome?.eval_result);
+      } catch {
+        text = String(outcome?.eval_result);
+      }
+      return `RESULT: ${clip(text ?? "undefined", 2000)}`;
+    }
+    case "browser_list_tabs":
+      return (outcome?.tabs || []).map((t: any) => `tab ${t.id}${t.active ? " (active)" : ""}: "${t.title}" ${t.url}`).join("\n");
+    case "browser_screenshot":
+      return "(screenshot captured; it is not visible to you, use browser_extract to read the page)";
+    default:
+      return "";
+  }
+}
+
 async function handleActionRequest(
   envelope: ProtocolEnvelope
-): Promise<{ success: boolean; summary: string; tabId?: number }> {
+): Promise<{ success: boolean; summary: string; tabId?: number; data?: string }> {
   const action = envelope.action;
   if (!action) return { success: false, summary: "Missing action" };
 
@@ -247,13 +284,9 @@ async function handleActionRequest(
       url: t.url || "",
     }));
     const summary = `Listed ${tabs.length} open browser tabs`;
-    sendActionFinished(envelope, {
-      success: true,
-      verified: true,
-      tabs,
-      outcome_summary: summary,
-    });
-    return { success: true, summary };
+    const outcome = { success: true, verified: true, tabs, outcome_summary: summary };
+    sendActionFinished(envelope, outcome);
+    return { success: true, summary, data: describeOutcomeForModel(action.type, outcome) };
   }
 
   if (action.type === "browser_new_tab") {
@@ -414,6 +447,31 @@ async function handleActionRequest(
       return { success: true, summary, tabId };
     } catch (err: any) {
       const msg = err?.message || "Navigation failed";
+      sendActionFailed(envelope, msg);
+      return { success: false, summary: msg, tabId };
+    }
+  }
+
+  // History navigation on the current tab
+  const historyOps: Record<string, (id: number) => Promise<void>> = {
+    browser_back: (id) => chrome.tabs.goBack(id),
+    browser_forward: (id) => chrome.tabs.goForward(id),
+    browser_reload: (id) => chrome.tabs.reload(id),
+  };
+  if (historyOps[action.type as string]) {
+    if (!tabId) {
+      sendActionFailed(envelope, "No active browser tab found");
+      return { success: false, summary: "No active browser tab found" };
+    }
+    try {
+      await historyOps[action.type as string](tabId);
+      await waitForTabComplete(tabId);
+      const tab = await chrome.tabs.get(tabId);
+      const summary = `${action.type.replace("browser_", "")} -> ${tab.url || ""}`;
+      sendActionFinished(envelope, { success: true, verified: true, tab_id: tabId, url: tab.url, outcome_summary: summary });
+      return { success: true, summary, tabId };
+    } catch (err: any) {
+      const msg = err?.message || `${action.type} failed`;
       sendActionFailed(envelope, msg);
       return { success: false, summary: msg, tabId };
     }
@@ -1407,15 +1465,25 @@ async function handleActionRequest(
         break;
       }
 
-      default:
-        outcome = { success: true, verified: true };
+      default: {
+        const msg = `Unknown action type "${action.type}"`;
+        sendActionFailed(envelope, msg);
+        return { success: false, summary: msg, tabId };
+      }
     }
 
-    sendActionFinished(envelope, outcome);
+    // Report what actually happened: a timed-out wait or a failed verify is not a success
+    const succeeded = outcome?.success !== false;
+    if (succeeded) {
+      sendActionFinished(envelope, outcome);
+    } else {
+      sendActionFailed(envelope, outcome?.outcome_summary || `${action.type} failed`);
+    }
     return {
-      success: true,
-      summary: outcome?.outcome_summary || `${action.type} succeeded`,
+      success: succeeded,
+      summary: outcome?.outcome_summary || `${action.type} ${succeeded ? "succeeded" : "failed"}`,
       tabId,
+      data: describeOutcomeForModel(action.type, outcome),
     };
   } catch (err: any) {
     const msg = err?.message || "Action failed";
@@ -2032,11 +2100,16 @@ function extractStepFromModelReply(
   return { cleanReply, action, done };
 }
 
+const NIM_REQUEST_TIMEOUT_MS = 90000;
+
 async function callNvidiaNim(
   apiKey: string,
   messages: Array<{ role: "system" | "user" | "assistant"; content: string }>
-): Promise<{ content: string; modelUsed: string }> {
+): Promise<{ content: string; modelUsed: string; error?: string }> {
+  let lastError = "no model answered";
   for (const model of ACTIVE_NIM_MODELS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), NIM_REQUEST_TIMEOUT_MS);
     try {
       const res = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
         method: "POST",
@@ -2050,19 +2123,28 @@ async function callNvidiaNim(
           temperature: 0.15,
           max_tokens: 1500,
         }),
+        signal: controller.signal,
       });
-      if (!res.ok) continue;
-      const data: any = await res.json();
-      const msg = data?.choices?.[0]?.message;
-      const content = (msg?.content || "").trim();
-      if (content) {
-        return { content, modelUsed: model };
+      if (!res.ok) {
+        lastError = `${model}: HTTP ${res.status}`;
+        // A rejected key won't work for the fallbacks either
+        if (res.status === 401 || res.status === 403) {
+          lastError = "API key rejected (401/403)";
+          break;
+        }
+        continue;
       }
-    } catch {
-      // Try next fallback model
+      const data: any = await res.json();
+      const content = (data?.choices?.[0]?.message?.content || "").trim();
+      if (content) return { content, modelUsed: model };
+      lastError = `${model}: empty reply`;
+    } catch (err: any) {
+      lastError = `${model}: ${err?.name === "AbortError" ? `timed out after ${NIM_REQUEST_TIMEOUT_MS / 1000} s` : err?.message || err}`;
+    } finally {
+      clearTimeout(timer);
     }
   }
-  return { content: "", modelUsed: ACTIVE_NIM_MODELS[0] };
+  return { content: "", modelUsed: ACTIVE_NIM_MODELS[0], error: lastError };
 }
 
 // Sends a 1-token request so the first real chat message doesn't pay NIM's cold start.
@@ -2128,7 +2210,7 @@ async function handleUserChat(
       return;
     }
 
-    const MAX_STEPS = 10;
+    const MAX_STEPS = 25;
     const stepHistory: string[] = [];
 
     for (let step = 1; step <= MAX_STEPS; step++) {
@@ -2155,27 +2237,25 @@ async function handleUserChat(
           : "(No interactive DOM elements visible or on internal browser page)";
 
       const systemPrompt = [
-        "You are the OpenCode Chrome Relay autonomous multi-step browser agent running inside the user's Chrome Side Panel.",
-        "You have full permission to navigate and interact with the user's logged-in Chrome browser tabs.",
-        "CRITICAL RULES:",
-        "1. NEVER refuse a task or claim you cannot access personal accounts/consoles.",
-        "2. For normal chat (like 'ping' or questions that need no browser actions), reply concisely in plain text with no JSON block.",
-        "3. For single or multi-step browser tasks, execute ONE action per step based on the Current Page Observation and Past Steps.",
-        "4. Useful Google Cloud Console direct URLs (use browser_navigate to jump directly when relevant):",
-        "   - APIs & Credentials (OAuth Client IDs / Secrets): https://console.cloud.google.com/apis/credentials",
-        "   - Create OAuth Client ID directly: https://console.cloud.google.com/apis/credentials/oauthclient",
-        "   - Enable YouTube Data API v3: https://console.cloud.google.com/apis/library/youtube.googleapis.com",
-        "   - Enable YouTube Analytics API: https://console.cloud.google.com/apis/library/youtubeanalytics.googleapis.com",
-        "   - IAM & Admin Permissions: https://console.cloud.google.com/iam-admin/iam",
-        "5. Output a brief 1-sentence explanation of the current step followed by a JSON block in this exact format:",
-        '```json\n{"done":false,"action":{"type":"browser_navigate","url":"https://console.cloud.google.com/apis/credentials"}}\n```',
-        '   - For clicking an element from the observation list: {"done":false,"action":{"type":"browser_click","locator":{"name":"exact button label","selector":"optional css selector"}}}',
-        '   - For typing into an input: {"done":false,"action":{"type":"browser_type","locator":{"name":"field label","selector":"optional css selector"},"text":"value"}}',
-        '   - For scrolling: {"done":false,"action":{"type":"browser_scroll","scroll_direction":"down","scroll_amount":450}}',
-        '   - For browser facts that are not on the page (installed extensions/plugins, open tabs): {"done":false,"action":{"type":"browser_info","topic":"extensions"}} (topic is "extensions" or "tabs"). The result appears in Actions Taken So Far; then answer the user from it.',
-        '   - To uninstall, disable or enable an installed extension/plugin: {"done":false,"action":{"type":"browser_extension","op":"uninstall","name":"Phantom"}} (op is "uninstall", "disable" or "enable"; one extension per step; Chrome shows the user a confirmation for uninstalls). Use browser_info first if you need the exact names.',
-        '   - When the user goal is complete (or awaiting user sign-in/confirmation), set "done":true and omit "action".',
-        "6. Internal chrome:// pages (extensions, settings, history) cannot be read or clicked. Never tell the user to look themselves; use browser_info or navigate elsewhere.",
+        "You are OpenCode Relay, an autonomous agent inside the user's Chrome side panel. You control the user's real, logged-in Chrome: tabs, pages, downloads, extensions, history and bookmarks.",
+        "RULES:",
+        "1. Never refuse or say you lack access: you have it. Act, then report what you did.",
+        "2. A plain question that needs no browser: answer in plain text, no JSON.",
+        "3. Otherwise do ONE action per step: one short sentence for the user, then a ```json block {\"done\":false,\"action\":{...}}. When the goal is complete, write the final answer for the user and {\"done\":true} with no action. Never mention JSON, steps, tools or observations to the user.",
+        "4. Internal chrome:// pages (extensions, settings, history, downloads, bookmarks) cannot be opened or read. Use browser_info / browser_extension instead, and never tell the user to do it themselves.",
+        "5. Read before you guess: to summarize, answer questions about, or find something on a page, use browser_extract first. Its text comes back under Actions Taken So Far.",
+        "6. Click elements from the observation list by their exact label (locator.name); use locator.selector when one is listed. After navigate/click/type the page is re-observed for you. If an action FAILED, try a different element or approach instead of repeating it.",
+        "ACTIONS (type: fields):",
+        "- browser_navigate: url | browser_back | browser_forward | browser_reload",
+        "- browser_new_tab: url | browser_switch_tab: value (tab id from browser_info tabs) | browser_close_tab (current tab)",
+        "- browser_click / browser_dblclick / browser_rightclick / browser_hover: locator",
+        "- browser_type: locator, text (replaces the field's content) | browser_keypress: text (Enter, Escape, Tab, ctrl+a ...) | browser_select: locator, value",
+        "- browser_scroll: scroll_direction (up|down), scroll_amount (px) | browser_wait: timeout_ms, optional locator or text to wait for",
+        "- browser_extract: optional locator.selector -> page text and links | browser_eval: text (JS expression) -> its result | browser_verify: text or locator",
+        "- browser_download: url, optional download_path | browser_screenshot",
+        "- browser_info: topic (extensions|tabs|history|bookmarks|downloads), optional query -> facts about the browser",
+        "- browser_extension: op (uninstall|disable|enable), name -> the user confirms with one click; one extension per step",
+        "locator = {\"name\": \"visible label\"} and/or {\"selector\": \"css\"}. Example: {\"done\":false,\"action\":{\"type\":\"browser_click\",\"locator\":{\"name\":\"Sign in\"}}}",
       ].join("\n");
 
       const stepContext = [
@@ -2194,18 +2274,22 @@ async function handleUserChat(
         step === 1
           ? history
               .slice(-4)
-              .filter((m) => m.text && m.text !== "Thinking...")
+              .filter((m) => m.text)
               .map((m) => ({
                 role: (m.role === "agent" ? "assistant" : "user") as "assistant" | "user",
                 content: m.text,
               }))
           : [];
 
-      const { content: replyText, modelUsed } = await callNvidiaNim(apiKey, [
+      const { content: replyText, modelUsed, error: nimError } = await callNvidiaNim(apiKey, [
         { role: "system", content: systemPrompt },
         ...priorChat,
         { role: "user", content: stepContext },
       ]);
+      if (!replyText) {
+        broadcastChatResponse(runId, epoch, `NVIDIA NIM didn't answer: ${nimError || "empty reply"}. Try again in a moment.`, "error");
+        break;
+      }
 
       const { cleanReply, action: parsedAction, done } = extractStepFromModelReply(
         replyText,
@@ -2239,7 +2323,8 @@ async function handleUserChat(
       // Browser facts are answered locally and fed back to the model; nothing is clicked
       if ((parsedAction.type as string) === "browser_info") {
         const topic = String((parsedAction as any).topic || "extensions");
-        stepHistory.push(`Step ${step}: browser_info(${topic}) -> ${await getBrowserInfo(topic)}`);
+        const query = String((parsedAction as any).query || "");
+        stepHistory.push(`Step ${step}: browser_info(${topic}${query ? ` "${query}"` : ""}) -> ${await getBrowserInfo(topic, query)}`);
         continue;
       }
 
@@ -2249,7 +2334,7 @@ async function handleUserChat(
       stepHistory.push(
         `Step ${step}: ${parsedAction.type} (${
           parsedAction.url || parsedAction.locator?.name || parsedAction.locator?.selector || ""
-        }) -> ${execRes.success ? "SUCCESS" : "FAILED"}: ${execRes.summary}`
+        }) -> ${execRes.success ? "SUCCESS" : "FAILED"}: ${execRes.summary}${execRes.data ? `\n${execRes.data}` : ""}`
       );
 
       // If this was a simple 1-step navigation request (e.g. "navigate to example.com") with no follow-up clauses, finish after step 1
@@ -2263,8 +2348,11 @@ async function handleUserChat(
         break;
       }
 
-      // Wait briefly for SPA rendering / dialogs to settle before next observation
-      await new Promise((r) => setTimeout(r, 1800));
+      // Wait briefly for SPA rendering / dialogs to settle before the next observation;
+      // read-only actions don't change the page, so don't pay for it there.
+      if (!READ_ONLY_ACTIONS.has(parsedAction.type as string)) {
+        await new Promise((r) => setTimeout(r, 1800));
+      }
     }
   } catch (err: any) {
     broadcastChatResponse(runId, epoch, `Error: ${err?.message || "Failed to contact agent"}`, "error");
@@ -2291,8 +2379,27 @@ async function handleUserChat(
 }
 
 // Read-only facts about the browser itself, for questions the page can't answer
-async function getBrowserInfo(topic: string): Promise<string> {
+async function getBrowserInfo(topic: string, query = ""): Promise<string> {
   try {
+    if (topic === "history") {
+      const weekAgo = Date.now() - 7 * 24 * 3600 * 1000;
+      const items = await chrome.history.search({ text: query, maxResults: 40, startTime: weekAgo });
+      if (!items.length) return `no history entries in the last 7 days${query ? ` matching "${query}"` : ""}`;
+      return `${items.length} history entries (last 7 days${query ? `, matching "${query}"` : ""}): ` +
+        items.map((h) => `"${h.title || h.url}" ${h.url} (${h.lastVisitTime ? new Date(h.lastVisitTime).toLocaleString() : "?"})`).join("; ");
+    }
+    if (topic === "bookmarks") {
+      const nodes = query ? await chrome.bookmarks.search(query) : flattenBookmarks(await chrome.bookmarks.getTree());
+      const links = nodes.filter((n) => n.url).slice(0, 60);
+      if (!links.length) return `no bookmarks${query ? ` matching "${query}"` : ""}`;
+      return `${links.length} bookmarks: ` + links.map((b) => `"${b.title}" ${b.url}`).join("; ");
+    }
+    if (topic === "downloads") {
+      const items = await chrome.downloads.search({ limit: 20, orderBy: ["-startTime"], ...(query ? { query: [query] } : {}) });
+      if (!items.length) return "no downloads";
+      return `${items.length} recent downloads: ` +
+        items.map((d) => `${d.filename.split(/[\\/]/).pop()} (${d.state}, ${Math.round(d.totalBytes / 1024)} KB) from ${d.url}`).join("; ");
+    }
     if (topic === "tabs") {
       const tabs = await chrome.tabs.query({});
       const list = tabs.slice(0, 40).map((t) => `"${t.title || t.url || "untitled"}"${t.active ? " (active)" : ""}`);
@@ -2310,6 +2417,18 @@ async function getBrowserInfo(topic: string): Promise<string> {
   } catch (err: any) {
     return `unavailable: ${err?.message || err}`;
   }
+}
+
+function flattenBookmarks(nodes: chrome.bookmarks.BookmarkTreeNode[]): chrome.bookmarks.BookmarkTreeNode[] {
+  const out: chrome.bookmarks.BookmarkTreeNode[] = [];
+  const walk = (list: chrome.bookmarks.BookmarkTreeNode[]) => {
+    for (const n of list) {
+      if (n.url) out.push(n);
+      if (n.children) walk(n.children);
+    }
+  };
+  walk(nodes);
+  return out;
 }
 
 // Pending extension ops waiting for the user's click in the side panel
@@ -2366,7 +2485,7 @@ async function dispatchBrowserAction(
   epoch: number,
   tabId: number | undefined,
   action: ActionPayload
-): Promise<{ success: boolean; summary: string; tabId?: number }> {
+): Promise<{ success: boolean; summary: string; tabId?: number; data?: string }> {
   const actionEnvelope: ProtocolEnvelope = {
     v: 1,
     event: "action.started",
