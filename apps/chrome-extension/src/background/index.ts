@@ -2,6 +2,7 @@ import { NativeBridgePort } from "./native_port.js";
 import { TabManager } from "./tab_manager.js";
 import { CDPController } from "./cdp_controller.js";
 import { ProtocolEnvelope, ActionPayload } from "@opencode/chrome-relay-protocol";
+import { NATIVE_HOST_NAME } from "../shared/constants.js";
 
 const nativePort = new NativeBridgePort();
 const tabManager = new TabManager();
@@ -72,7 +73,7 @@ nativePort.onMessage(async (msg: ProtocolEnvelope) => {
 
   // Broadcast to sidepanel and open extension views
   try {
-    chrome.runtime.sendMessage(msg);
+    chrome.runtime.sendMessage(msg).catch(() => {});
   } catch {
     // Side panel might be closed
   }
@@ -428,7 +429,7 @@ async function handleActionRequest(
     chrome.tabs.sendMessage(tabId, {
       type: "OVERLAY_ACTION_PREVIEW",
       action,
-    });
+    }).catch(() => {});
   } catch {
     // Content script may not be loaded yet on some tabs
   }
@@ -1641,7 +1642,7 @@ function sendActionFinished(envelope: ProtocolEnvelope, outcome: any): void {
         type: "OVERLAY_ACTION_OUTCOME",
         success: true,
         message: outcome?.outcome_summary || "Action verified",
-      });
+      }).catch(() => {});
     } catch {
       // Content script may not be present
     }
@@ -1661,7 +1662,7 @@ function sendActionFinished(envelope: ProtocolEnvelope, outcome: any): void {
   };
 
   try {
-    chrome.runtime.sendMessage(finishedEnvelope);
+    chrome.runtime.sendMessage(finishedEnvelope).catch(() => {});
   } catch {
     // Side panel might be closed
   }
@@ -1677,7 +1678,7 @@ function sendActionFailed(envelope: ProtocolEnvelope, error: string): void {
         type: "OVERLAY_ACTION_OUTCOME",
         success: false,
         message: error,
-      });
+      }).catch(() => {});
     } catch {
       // Content script may not be present
     }
@@ -1697,7 +1698,7 @@ function sendActionFailed(envelope: ProtocolEnvelope, error: string): void {
   };
 
   try {
-    chrome.runtime.sendMessage(failedEnvelope);
+    chrome.runtime.sendMessage(failedEnvelope).catch(() => {});
   } catch {
     // Side panel might be closed
   }
@@ -1759,6 +1760,9 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
       );
     }
     sendResponse({ success: true });
+  } else if (request.type === "WARM_NIM") {
+    void warmNim().then(sendResponse);
+    return true;
   } else if (request.type === "SESSION_COMMAND") {
     nativePort.send({
       v: 1,
@@ -1778,16 +1782,51 @@ const ACTIVE_NIM_MODELS = [
   "poolside/laguna-xs-2.1",
 ];
 
+// Key shared with OpenCode, fetched from the local native host; kept in memory only
+let opencodeNimKey: string | null = null;
+
 async function getNvidiaApiKey(): Promise<string> {
-  // BUG-003 fix: API keys must NEVER be embedded in extension code
-  // Users must configure their own key in extension settings
+  // BUG-003 fix: API keys must NEVER be embedded in extension code.
+  // A key saved in extension settings wins; otherwise reuse the one OpenCode already has.
   try {
     const stored = await chrome.storage.local.get("nvidia_api_key");
     if (stored?.nvidia_api_key) return stored.nvidia_api_key;
   } catch {
     // Storage unavailable
   }
-  return "";
+  if (!opencodeNimKey) opencodeNimKey = await requestNimKeyFromNativeHost();
+  return opencodeNimKey;
+}
+
+// Asks the native host for OpenCode's NVIDIA key (NVIDIA_API_KEY or opencode's auth.json)
+function requestNimKeyFromNativeHost(): Promise<string> {
+  return new Promise((resolve) => {
+    let port: chrome.runtime.Port;
+    try {
+      port = chrome.runtime.connectNative(NATIVE_HOST_NAME);
+    } catch {
+      resolve("");
+      return;
+    }
+    let settled = false;
+    const finish = (key: string) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        port.disconnect();
+      } catch {
+        // Already closed
+      }
+      resolve(key);
+    };
+    const timer = setTimeout(() => finish(""), 3000);
+    port.onMessage.addListener((msg: any) => {
+      if (typeof msg?.nim_key === "string") finish(msg.nim_key);
+    });
+    port.onDisconnect.addListener(() => finish(""));
+    port.postMessage({ request: "get_nim_key" });
+  });
 }
 
 function extractBalancedJsonObjects(text: string): Array<{ raw: string; parsed: any }> {
@@ -2006,6 +2045,38 @@ async function callNvidiaNim(
   return { content: "", modelUsed: ACTIVE_NIM_MODELS[0] };
 }
 
+// Sends a 1-token request so the first real chat message doesn't pay NIM's cold start.
+// Walks the same fallback order as callNvidiaNim and reports the first model that answers.
+async function warmNim(): Promise<
+  { state: "ready"; model: string; ms: number } | { state: "no_key" } | { state: "error"; detail: string }
+> {
+  const apiKey = await getNvidiaApiKey();
+  if (!apiKey) return { state: "no_key" };
+
+  let detail = "unreachable";
+  for (const model of ACTIVE_NIM_MODELS) {
+    const started = Date.now();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30000);
+    try {
+      const res = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({ model, messages: [{ role: "user", content: "ping" }], max_tokens: 1 }),
+        signal: controller.signal,
+      });
+      if (res.ok) return { state: "ready", model, ms: Date.now() - started };
+      detail = res.status === 401 || res.status === 403 ? "API key rejected" : `HTTP ${res.status}`;
+      if (res.status === 401 || res.status === 403) break;
+    } catch {
+      detail = "unreachable";
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return { state: "error", detail };
+}
+
 async function handleUserChat(
   runId: string,
   epoch: number,
@@ -2081,7 +2152,9 @@ async function handleUserChat(
         '   - For clicking an element from the observation list: {"done":false,"action":{"type":"browser_click","locator":{"name":"exact button label","selector":"optional css selector"}}}',
         '   - For typing into an input: {"done":false,"action":{"type":"browser_type","locator":{"name":"field label","selector":"optional css selector"},"text":"value"}}',
         '   - For scrolling: {"done":false,"action":{"type":"browser_scroll","scroll_direction":"down","scroll_amount":450}}',
+        '   - For browser facts that are not on the page (installed extensions/plugins, open tabs): {"done":false,"action":{"type":"browser_info","topic":"extensions"}} (topic is "extensions" or "tabs"). The result appears in Actions Taken So Far; then answer the user from it.',
         '   - When the user goal is complete (or awaiting user sign-in/confirmation), set "done":true and omit "action".',
+        "6. Internal chrome:// pages (extensions, settings, history) cannot be read or clicked. Never tell the user to look themselves; use browser_info or navigate elsewhere.",
       ].join("\n");
 
       const stepContext = [
@@ -2133,6 +2206,13 @@ async function handleUserChat(
         break;
       }
 
+      // Browser facts are answered locally and fed back to the model; nothing is clicked
+      if ((parsedAction.type as string) === "browser_info") {
+        const topic = String((parsedAction as any).topic || "extensions");
+        stepHistory.push(`Step ${step}: browser_info(${topic}) -> ${await getBrowserInfo(topic)}`);
+        continue;
+      }
+
       const execRes = await dispatchBrowserAction(runId, epoch, currentTabId, parsedAction);
       if (execRes.tabId) currentTabId = execRes.tabId;
 
@@ -2175,6 +2255,28 @@ async function handleUserChat(
   }
 }
 
+// Read-only facts about the browser itself, for questions the page can't answer
+async function getBrowserInfo(topic: string): Promise<string> {
+  try {
+    if (topic === "tabs") {
+      const tabs = await chrome.tabs.query({});
+      const list = tabs.slice(0, 40).map((t) => `"${t.title || t.url || "untitled"}"${t.active ? " (active)" : ""}`);
+      return `${tabs.length} open tabs: ${list.join(", ")}${tabs.length > 40 ? ", ..." : ""}`;
+    }
+    const all = await chrome.management.getAll();
+    const exts = all.filter((e) => e.type === "extension" && e.id !== chrome.runtime.id);
+    const enabled = exts.filter((e) => e.enabled);
+    const disabled = exts.filter((e) => !e.enabled);
+    const names = (list: chrome.management.ExtensionInfo[]) => list.map((e) => e.name).join(", ") || "none";
+    return (
+      `${exts.length} other extensions installed (plus this one, OpenCode Chrome Relay). ` +
+      `Enabled (${enabled.length}): ${names(enabled)}. Disabled (${disabled.length}): ${names(disabled)}.`
+    );
+  } catch (err: any) {
+    return `unavailable: ${err?.message || err}`;
+  }
+}
+
 async function dispatchBrowserAction(
   runId: string,
   epoch: number,
@@ -2194,7 +2296,7 @@ async function dispatchBrowserAction(
     payload: { from_extension: true },
   };
   try {
-    chrome.runtime.sendMessage(actionEnvelope);
+    chrome.runtime.sendMessage(actionEnvelope).catch(() => {});
   } catch {
     // Sidepanel closed
   }
@@ -2217,7 +2319,7 @@ function broadcastChatResponse(runId: string, epoch: number, text: string, model
     },
   };
   try {
-    chrome.runtime.sendMessage(envelope);
+    chrome.runtime.sendMessage(envelope).catch(() => {});
   } catch {
     // Sidepanel closed
   }

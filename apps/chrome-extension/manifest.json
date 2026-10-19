@@ -2,6 +2,7 @@
   "manifest_version": 3,
   "name": "OpenCode Chrome Relay",
   "version": "1.0.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAiNxHGd/rR9EeVw/nh048g+Dq/ORO8aAuyXBt13TH1NF9dTwwv/jOHrp5vzxRwa1Mzw5R/BTCsyIZk8tOB7Bm9cEDMq4iR45CACRKZoI8NIpKJkI0nKIIbYfvrUTPVWjIRN1/RoojVqGIcaxXe6qlnWn2Vq/1Ngyt5eliMc6e+0pdbfnkIYzuWIZrdEvz2w7/DSuW+p5im6e6E1+2Gpue2YKVbxCuWLERinphTP/xLdZuh+eGx8uttx7ouLcUeHvCBmjs0SX1nojy1lMRU6mBaveefLCw2WGhI6eu2qAlWvcYkHNjMRlZB26LthFcrCqb4m7bErgjJ7Qh0gJ7zr9E9wIDAQAB",
   "description": "Browser-native agent cockpit pairing your personal Chrome profile with OpenCode.",
   "permissions": [
     "sidePanel",
@@ -11,7 +12,8 @@
     "nativeMessaging",
     "activeTab",
     "tabs",
-    "downloads"
+    "downloads",
+    "management"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -61,5 +63,14 @@
         "<all_urls>"
       ]
     }
-  ]
+  ],
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Alt+Shift+K",
+        "mac": "Alt+Shift+K"
+      },
+      "description": "Open the Relay side panel"
+    }
+  }
 }

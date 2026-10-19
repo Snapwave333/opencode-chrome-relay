@@ -10,12 +10,24 @@ export class NativeBridgePort {
   private keepAliveInterval: ReturnType<typeof setInterval> | null = null;
   private authToken: string | null = null;
   private authTokenRequested = false;
+  private connecting: Promise<boolean> | null = null;
+  private authenticated = false;
 
   public async connect(): Promise<boolean> {
     this.startKeepAlive();
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
       return true;
     }
+    if (this.connecting) return this.connecting;
+    this.connecting = this.openConnection();
+    try {
+      return await this.connecting;
+    } finally {
+      this.connecting = null;
+    }
+  }
+
+  private async openConnection(): Promise<boolean> {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -25,7 +37,9 @@ export class NativeBridgePort {
     if (!this.authToken && !this.authTokenRequested) {
       this.authTokenRequested = true;
       await this.fetchAuthToken();
+      this.authTokenRequested = false;
     }
+    if (!this.authToken) return false;
     
     try {
       const ws = new WebSocket(DEFAULT_BROKER_URL);
@@ -36,14 +50,20 @@ export class NativeBridgePort {
           ws.send(JSON.stringify({ auth_token: this.authToken }));
         }
         
-        while (this.pendingQueue.length > 0 && ws.readyState === WebSocket.OPEN) {
-          const item = this.pendingQueue.shift()!;
-          ws.send(item);
-        }
       };
       ws.onmessage = (ev) => {
         try {
           const parsed = typeof ev.data === "string" ? JSON.parse(ev.data) : ev.data;
+          if (parsed?.event === "bridge.connected" && parsed?.status === "authenticated") {
+            this.authenticated = true;
+            while (this.pendingQueue.length > 0 && ws.readyState === WebSocket.OPEN) {
+              ws.send(this.pendingQueue.shift()!);
+            }
+          }
+          if (parsed?.error === "Unauthorized") {
+            this.authenticated = false;
+            ws.close();
+          }
           for (const listener of this.messageListeners) {
             listener(parsed);
           }
@@ -54,6 +74,7 @@ export class NativeBridgePort {
       ws.onclose = () => {
         if (this.ws === ws) {
           this.ws = null;
+          this.authenticated = false;
         }
         for (const listener of this.disconnectListeners) {
           listener();
@@ -149,7 +170,7 @@ export class NativeBridgePort {
       } catch {
         // Ignore
       }
-      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN && this.authenticated) {
         try {
           this.ws.send(
             JSON.stringify({
@@ -191,7 +212,7 @@ export class NativeBridgePort {
 
   public send(msg: any): boolean {
     const serialized = typeof msg === "string" ? msg : JSON.stringify(msg);
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN && this.authenticated) {
       this.ws.send(serialized);
       return true;
     }
@@ -212,10 +233,10 @@ export class NativeBridgePort {
   }
 
   public isConnected(): boolean {
-    if (this.ws !== null && this.ws.readyState === WebSocket.OPEN) {
+    if (this.ws !== null && this.ws.readyState === WebSocket.OPEN && this.authenticated) {
       return true;
     }
     this.connect();
-    return this.ws !== null && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING);
+    return false;
   }
 }

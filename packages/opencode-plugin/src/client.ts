@@ -1,4 +1,7 @@
 import WebSocket from "ws";
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+import os from "node:os";
 import {
   ProtocolEnvelope,
   ActionPayload,
@@ -36,10 +39,6 @@ export class RelayBrokerClient {
 
     // Try to read from config file
     try {
-      const fs = require('fs');
-      const path = require('path');
-      const os = require('os');
-      
       let configDir: string;
       if (process.platform === 'win32') {
         configDir = path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'opencode-relay');
@@ -49,8 +48,8 @@ export class RelayBrokerClient {
       }
       
       const tokenFile = path.join(configDir, 'auth-token');
-      if (fs.existsSync(tokenFile)) {
-        return fs.readFileSync(tokenFile, 'utf-8').trim();
+      if (existsSync(tokenFile)) {
+        return readFileSync(tokenFile, 'utf-8').trim();
       }
     } catch (err) {
       // Silently fail - will try to connect without token
@@ -60,6 +59,7 @@ export class RelayBrokerClient {
   }
 
   public async connect(): Promise<void> {
+    if (!this.authToken) throw new Error("Relay broker authentication token is missing");
     return new Promise((resolve, reject) => {
       try {
         this.ws = new WebSocket(this.brokerUrl);
