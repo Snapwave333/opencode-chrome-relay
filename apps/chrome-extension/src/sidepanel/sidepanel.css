@@ -367,3 +367,10 @@ body { background: var(--bg); }
 .state-paused { color: var(--muted); }
 .state-warming { color: var(--muted); animation: blink 1.2s infinite ease-in-out; }
 .state-done { opacity: 0.6; }
+
+/* Header: icon + status dot only */
+.brand-mark { width: 22px; height: 22px; margin: 0 6px 0 0; padding: 0; background: none; border-radius: 6px; overflow: hidden; }
+.brand-mark svg { display: block; }
+.model { margin-left: 2px; }
+.model::before { margin-right: 0; width: 7px; height: 7px; }
+.bar { padding: 8px 10px; }

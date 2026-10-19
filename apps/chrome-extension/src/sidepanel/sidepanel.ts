@@ -68,7 +68,6 @@ const sessions: Map<string, SessionData> = new Map();
 let activeRunId = "run_1";
 let sessionCounter = 1;
 
-modelNameLabel.textContent = "NVIDIA NIM";
 const SEND_ICON = getMaterial3Svg("send", 16);
 const STOP_ICON = getMaterial3Svg("stop", 16);
 
@@ -168,7 +167,6 @@ window.setInterval(paintMood, 9000);
 
 // Initialize button icons with Material 3
 btnNewSession.innerHTML = getMaterial3Svg("add", 16);
-(document.getElementById("brand-mark") as HTMLElement).innerHTML = getMaterial3Svg("bolt", 14);
 btnPause.innerHTML = `${getMaterial3Svg("pause", 12)} <span>PAUSE</span>`;
 btnStop.innerHTML = `${getMaterial3Svg("stop", 12)} <span>STOP</span>`;
 btnRestart.innerHTML = `${getMaterial3Svg("restart_alt", 12)} <span>RESTART</span>`;
@@ -197,8 +195,8 @@ setInterval(refreshBridgeStatus, 5000);
 // Warm up NVIDIA NIM as soon as the panel opens and show whether it's ready
 function setNimStatus(state: "warming" | "ready" | "error", text: string, title = text): void {
   modelNameLabel.className = `model nim-${state}`;
-  modelNameLabel.textContent = text;
-  modelNameLabel.title = title;
+  modelNameLabel.title = title === text ? text : `${text} — ${title}`;
+  modelNameLabel.setAttribute("aria-label", text);
 }
 
 function shortModelName(model: string): string {
