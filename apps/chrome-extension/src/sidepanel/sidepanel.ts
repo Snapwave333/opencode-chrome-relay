@@ -19,6 +19,8 @@ interface ChatMessage {
   text: string;
   pending?: boolean;
   failed?: boolean;
+  // An extension op waiting for the user's click (Chrome needs a user gesture for it)
+  confirm?: { requestId: string; op: "uninstall" | "disable" | "enable"; id: string; name: string };
 }
 
 interface SessionData {
@@ -365,6 +367,7 @@ function renderChatMessages(session: SessionData): void {
       body.textContent = msg.text;
     }
     column.appendChild(body);
+    if (msg.confirm) column.appendChild(buildConfirmRow(session, msg));
 
     entry.appendChild(avatar);
     entry.appendChild(column);
@@ -374,6 +377,54 @@ function renderChatMessages(session: SessionData): void {
   updatePendingStateIcon();
 
   timelineContainer.scrollTop = timelineContainer.scrollHeight;
+}
+
+// Buttons for an extension op. The click is the user gesture chrome.management needs,
+// so the op runs right here and the result goes back to the background run.
+function buildConfirmRow(session: SessionData, msg: ChatMessage): HTMLElement {
+  const { requestId, op, id, name } = msg.confirm!;
+  const row = document.createElement("div");
+  row.className = "confirm-row";
+  const verb = op === "uninstall" ? "Remove" : op === "disable" ? "Disable" : "Enable";
+
+  const finish = (text: string, outcome: string, failed = false) => {
+    msg.confirm = undefined;
+    msg.text = text;
+    msg.failed = failed;
+    renderChatMessages(session);
+    chrome.runtime.sendMessage({ type: "EXTENSION_CONFIRM_RESULT", requestId, outcome });
+  };
+
+  const yes = document.createElement("button");
+  yes.type = "button";
+  yes.className = `confirm-btn primary${op === "uninstall" ? " danger" : ""}`;
+  yes.innerHTML = `${getMaterial3Svg(op === "uninstall" ? "cancel" : op === "disable" ? "pause_circle" : "check_circle", 14)} <span>${verb} ${name}</span>`;
+  yes.onclick = async () => {
+    yes.disabled = no.disabled = true;
+    try {
+      if (op === "uninstall") {
+        await chrome.management.uninstall(id, { showConfirmDialog: false });
+        const stillThere = (await chrome.management.getAll()).some((e) => e.id === id);
+        if (stillThere) return finish(`"${name}" is still installed.`, `CANCELLED: "${name}" was not removed`, true);
+        finish(`Removed "${name}".`, `SUCCESS: "${name}" was uninstalled`);
+      } else {
+        await chrome.management.setEnabled(id, op === "enable");
+        finish(`${verb}d "${name}".`, `SUCCESS: "${name}" is now ${op}d`);
+      }
+    } catch (err: any) {
+      finish(`Couldn't ${op} "${name}": ${err?.message || err}`, `FAILED: ${err?.message || err}`, true);
+    }
+  };
+
+  const no = document.createElement("button");
+  no.type = "button";
+  no.className = "confirm-btn";
+  no.textContent = "Keep";
+  no.onclick = () => finish(`Kept "${name}".`, `CANCELLED: you chose to keep "${name}"`);
+
+  row.appendChild(yes);
+  row.appendChild(no);
+  return row;
 }
 
 function renderActivityFeed(session: SessionData): void {
@@ -798,14 +849,17 @@ chrome.runtime.onMessage.addListener((msg) => {
     // Each step's text replaces the working reply; it stays "working" until run.completed
     const pendingIdx = session.messages.findIndex((m) => m.pending);
     const last = session.messages[session.messages.length - 1];
+    const confirm = msg.payload.confirm;
     if (pendingIdx !== -1) {
       session.messages[pendingIdx].text = replyText;
       session.messages[pendingIdx].failed = model === "error";
+      session.messages[pendingIdx].confirm = confirm;
     } else if (last && last.role === "agent") {
       last.text = replyText;
       last.failed = model === "error";
+      last.confirm = confirm;
     } else {
-      session.messages.push({ id: `msg_a_${Date.now()}`, role: "agent", text: replyText, pending: true });
+      session.messages.push({ id: `msg_a_${Date.now()}`, role: "agent", text: replyText, pending: true, confirm });
     }
 
     if (targetRunId === activeRunId) {

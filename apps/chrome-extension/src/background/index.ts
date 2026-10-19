@@ -1760,6 +1760,13 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
       );
     }
     sendResponse({ success: true });
+  } else if (request.type === "EXTENSION_CONFIRM_RESULT") {
+    const resolve = extensionConfirms.get(request.requestId);
+    if (resolve) {
+      extensionConfirms.delete(request.requestId);
+      resolve(String(request.outcome || "FAILED: no outcome"));
+    }
+    sendResponse({ ok: !!resolve });
   } else if (request.type === "WARM_NIM") {
     void warmNim().then(sendResponse);
     return true;
@@ -2220,14 +2227,11 @@ async function handleUserChat(
         break;
       }
 
-      // Extension management goes through chrome.management (Chrome confirms uninstalls with the user)
+      // Extension management: chrome.management needs a user gesture, so the side panel
+      // shows a confirm button and performs the op on the user's click.
       if ((parsedAction.type as string) === "browser_extension") {
         const { op, name } = parsedAction as any;
-        if (op === "uninstall") {
-          broadcastChatResponse(runId, epoch, `Chrome will ask you to confirm removing "${name}"…`, modelUsed);
-        }
-        const outcome = await manageExtension(String(op || ""), String(name || ""));
-        broadcastChatResponse(runId, epoch, outcome.replace(/^(SUCCESS|CANCELLED|FAILED): /, ""), modelUsed);
+        const outcome = await manageExtension(runId, epoch, modelUsed, String(op || ""), String(name || ""));
         stepHistory.push(`Step ${step}: browser_extension(${op} "${name}") -> ${outcome}`);
         continue;
       }
@@ -2308,8 +2312,12 @@ async function getBrowserInfo(topic: string): Promise<string> {
   }
 }
 
+// Pending extension ops waiting for the user's click in the side panel
+const extensionConfirms = new Map<string, (outcome: string) => void>();
+
 // Uninstall / disable / enable an extension by (fuzzy) name. Never touches this extension.
-async function manageExtension(op: string, name: string): Promise<string> {
+// The actual chrome.management call runs in the side panel on a click (Chrome requires a user gesture).
+async function manageExtension(runId: string, epoch: number, model: string, op: string, name: string): Promise<string> {
   if (!["uninstall", "disable", "enable"].includes(op)) return `FAILED: unknown op "${op}"`;
   const wanted = name.trim().toLowerCase();
   if (!wanted) return "FAILED: no extension name given";
@@ -2323,18 +2331,31 @@ async function manageExtension(op: string, name: string): Promise<string> {
       all.find((e) => e.name.toLowerCase().includes(wanted));
     if (!match) return `FAILED: no installed extension matches "${name}". Installed: ${all.map((e) => e.name).join(", ")}`;
 
-    if (op === "uninstall") {
-      await Promise.race([
-        chrome.management.uninstall(match.id, { showConfirmDialog: true }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("no answer from Chrome's confirmation dialog after 90 s")), 90000)),
-      ]);
-      const stillThere = (await chrome.management.getAll()).some((e) => e.id === match.id);
-      return stillThere
-        ? `CANCELLED: you declined Chrome's confirmation, so "${match.name}" stays installed`
-        : `SUCCESS: "${match.name}" was uninstalled`;
-    }
-    await chrome.management.setEnabled(match.id, op === "enable");
-    return `SUCCESS: "${match.name}" is now ${op}d`;
+    const requestId = `ext_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const verb = op === "uninstall" ? "Remove" : op === "disable" ? "Disable" : "Enable";
+    return await new Promise<string>((resolve) => {
+      extensionConfirms.set(requestId, resolve);
+      setTimeout(() => {
+        if (extensionConfirms.delete(requestId)) resolve(`CANCELLED: no answer within 2 minutes, "${match.name}" left as is`);
+      }, 120000);
+      const envelope: ProtocolEnvelope = {
+        v: 1,
+        event: "chat.response",
+        event_id: `evt_chat_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        run_id: runId,
+        epoch,
+        payload: {
+          text: `${verb} "${match.name}"?`,
+          model,
+          from_extension: true,
+          confirm: { requestId, op, id: match.id, name: match.name },
+        },
+      };
+      chrome.runtime.sendMessage(envelope).catch(() => {
+        if (extensionConfirms.delete(requestId)) resolve("FAILED: the side panel is closed, so nobody can confirm");
+      });
+    });
   } catch (err: any) {
     return `FAILED: could not ${op} "${name}": ${err?.message || err}`;
   }

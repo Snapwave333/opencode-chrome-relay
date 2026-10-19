@@ -386,3 +386,24 @@ body { background: var(--bg); }
   background: hsl(var(--user-hue, 210) 70% 48%);
   color: #fff;
 }
+
+/* Confirm buttons for extension removals (the click is Chrome's required user gesture) */
+.confirm-row { display: flex; gap: 8px; margin-top: 8px; }
+.confirm-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.confirm-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.14); }
+.confirm-btn:disabled { opacity: 0.5; cursor: default; }
+.confirm-btn.primary { background: rgba(255, 255, 255, 0.9); color: #000; border-color: transparent; }
+.confirm-btn.primary.danger { background: #ff5f5f; color: #fff; }
+.confirm-btn svg { fill: currentColor; }
