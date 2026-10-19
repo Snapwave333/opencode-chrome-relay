@@ -359,7 +359,7 @@ function renderChatMessages(session: SessionData): void {
 
     const body = document.createElement("div");
     body.className = "msg-body";
-    if (msg.pending) {
+    if (msg.pending && !msg.text) {
       body.innerHTML = '<span class="typing"><i></i><i></i><i></i></span>';
     } else {
       body.textContent = msg.text;
@@ -680,7 +680,7 @@ function submitChatMessage(): void {
   current.messages.push({
     id: `msg_a_${Date.now()}`,
     role: "agent",
-    text: "Thinking...",
+    text: "",
     pending: true,
   });
 
@@ -795,31 +795,28 @@ chrome.runtime.onMessage.addListener((msg) => {
       setNimStatus("ready", `NIM ready · ${shortModelName(model)}`);
     }
 
+    // Each step's text replaces the working reply; it stays "working" until run.completed
     const pendingIdx = session.messages.findIndex((m) => m.pending);
+    const last = session.messages[session.messages.length - 1];
     if (pendingIdx !== -1) {
-      session.messages[pendingIdx] = {
-        id: session.messages[pendingIdx].id,
-        role: "agent",
-        text: replyText,
-        pending: false,
-        failed: model === "error",
-      };
-    } else if (
-      session.messages.length > 0 &&
-      session.messages[session.messages.length - 1].role === "agent"
-    ) {
-      session.messages[session.messages.length - 1].text = replyText;
+      session.messages[pendingIdx].text = replyText;
+      session.messages[pendingIdx].failed = model === "error";
+    } else if (last && last.role === "agent") {
+      last.text = replyText;
+      last.failed = model === "error";
     } else {
-      session.messages.push({
-        id: `msg_a_${Date.now()}`,
-        role: "agent",
-        text: replyText,
-      });
+      session.messages.push({ id: `msg_a_${Date.now()}`, role: "agent", text: replyText, pending: true });
     }
 
     if (targetRunId === activeRunId) {
       renderChatMessages(session);
       setMood(model === "error" ? "error" : restingMood(), model === "error" ? 2500 : undefined);
+    }
+  } else if (msg.event === "run.completed") {
+    for (const m of session.messages) m.pending = false;
+    if (targetRunId === activeRunId) {
+      renderChatMessages(session);
+      setMood(restingMood());
     }
   } else if (msg.event === "run.state_changed" && msg.payload) {
     session.state = msg.payload.new_state;

@@ -161,7 +161,7 @@ function normalizeUrl(rawUrl: string): string {
     .replace(/[?.!,;]+$/, "")
     .trim();
 
-  if (/^https?:\/\//i.test(cleaned)) return cleaned;
+  if (/^(https?|chrome|chrome-extension|file):\/\//i.test(cleaned)) return cleaned;
   if (/^localhost(:\d+)?(\/.*)?$/i.test(cleaned) || /^127\.0\.0\.1(:\d+)?(\/.*)?$/i.test(cleaned)) {
     return `http://${cleaned}`;
   }
@@ -2223,7 +2223,11 @@ async function handleUserChat(
       // Extension management goes through chrome.management (Chrome confirms uninstalls with the user)
       if ((parsedAction.type as string) === "browser_extension") {
         const { op, name } = parsedAction as any;
+        if (op === "uninstall") {
+          broadcastChatResponse(runId, epoch, `Chrome will ask you to confirm removing "${name}"…`, modelUsed);
+        }
         const outcome = await manageExtension(String(op || ""), String(name || ""));
+        broadcastChatResponse(runId, epoch, outcome.replace(/^(SUCCESS|CANCELLED|FAILED): /, ""), modelUsed);
         stepHistory.push(`Step ${step}: browser_extension(${op} "${name}") -> ${outcome}`);
         continue;
       }
@@ -2264,6 +2268,11 @@ async function handleUserChat(
     const current = activeRuns.get(runId);
     if (current?.token === runToken) {
       activeRuns.delete(runId);
+    }
+    try {
+      chrome.runtime.sendMessage({ event: "run.completed", run_id: runId }).catch(() => {});
+    } catch {
+      // Side panel closed
     }
     nativePort.send({
       v: 1,
@@ -2315,16 +2324,19 @@ async function manageExtension(op: string, name: string): Promise<string> {
     if (!match) return `FAILED: no installed extension matches "${name}". Installed: ${all.map((e) => e.name).join(", ")}`;
 
     if (op === "uninstall") {
-      await chrome.management.uninstall(match.id, { showConfirmDialog: true });
+      await Promise.race([
+        chrome.management.uninstall(match.id, { showConfirmDialog: true }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("no answer from Chrome's confirmation dialog after 90 s")), 90000)),
+      ]);
       const stillThere = (await chrome.management.getAll()).some((e) => e.id === match.id);
       return stillThere
-        ? `CANCELLED: the user declined Chrome's confirmation to remove "${match.name}"`
+        ? `CANCELLED: you declined Chrome's confirmation, so "${match.name}" stays installed`
         : `SUCCESS: "${match.name}" was uninstalled`;
     }
     await chrome.management.setEnabled(match.id, op === "enable");
     return `SUCCESS: "${match.name}" is now ${op}d`;
   } catch (err: any) {
-    return `FAILED: ${err?.message || err}`;
+    return `FAILED: could not ${op} "${name}": ${err?.message || err}`;
   }
 }
 
