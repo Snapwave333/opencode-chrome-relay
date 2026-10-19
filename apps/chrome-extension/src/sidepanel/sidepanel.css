@@ -407,3 +407,19 @@ body { background: var(--bg); }
 .confirm-btn.primary { background: rgba(255, 255, 255, 0.9); color: #000; border-color: transparent; }
 .confirm-btn.primary.danger { background: #ff5f5f; color: #fff; }
 .confirm-btn svg { fill: currentColor; }
+
+/* Agent reply formatting (markdown-lite) */
+.msg.agent .msg-body p { margin: 0 0 6px; }
+.msg.agent .msg-body p:last-child { margin-bottom: 0; }
+.msg.agent .msg-body ul, .msg.agent .msg-body ol { margin: 2px 0 6px; padding-left: 20px; }
+.msg.agent .msg-body li { margin: 2px 0; }
+.msg.agent .msg-body code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.1);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12.5px;
+}
+.msg.agent .msg-body a { color: #8ab4ff; text-decoration: none; }
+.msg.agent .msg-body a:hover { text-decoration: underline; }
+.msg.agent .msg-body strong { color: #fff; }

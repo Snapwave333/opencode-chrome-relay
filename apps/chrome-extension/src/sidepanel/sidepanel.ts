@@ -364,7 +364,11 @@ function renderChatMessages(session: SessionData): void {
     if (msg.pending && !msg.text) {
       body.innerHTML = '<span class="typing"><i></i><i></i><i></i></span>';
     } else {
-      body.textContent = msg.text;
+      if (msg.role === "agent") {
+        body.innerHTML = renderMarkdownLite(msg.text);
+      } else {
+        body.textContent = msg.text;
+      }
     }
     column.appendChild(body);
     if (msg.confirm) column.appendChild(buildConfirmRow(session, msg));
@@ -377,6 +381,60 @@ function renderChatMessages(session: SessionData): void {
   updatePendingStateIcon();
 
   timelineContainer.scrollTop = timelineContainer.scrollHeight;
+}
+
+// Minimal Markdown for agent replies: bold, italics, inline code, links, bullet and
+// numbered lists, paragraphs. Everything is HTML-escaped first, so page text can't inject markup.
+function renderMarkdownLite(text: string): string {
+  const esc = (t: string) =>
+    t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  const inline = (t: string) =>
+    esc(t)
+      .replace(/`([^`]+)`/g, "<code>$1</code>")
+      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>")
+      .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+      .replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+
+  const lines = text.replace(/\r/g, "").split("\n");
+  const out: string[] = [];
+  let list: "ul" | "ol" | null = null;
+  let para: string[] = [];
+  const flushPara = () => {
+    if (para.length) out.push(`<p>${para.map(inline).join("<br>")}</p>`);
+    para = [];
+  };
+  const closeList = () => {
+    if (list) out.push(`</${list}>`);
+    list = null;
+  };
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    const bullet = /^\s*[-*•]\s+(.*)$/.exec(line);
+    const numbered = /^\s*\d+[.)]\s+(.*)$/.exec(line);
+    if (bullet || numbered) {
+      flushPara();
+      const kind = bullet ? "ul" : "ol";
+      if (list !== kind) {
+        closeList();
+        list = kind;
+        out.push(`<${kind}>`);
+      }
+      out.push(`<li>${inline((bullet || numbered)![1])}</li>`);
+    } else if (!line.trim()) {
+      flushPara();
+      closeList();
+    } else if (list && /^\s+/.test(line) && out.length && out[out.length - 1].startsWith("<li>")) {
+      // Indented continuation of the previous list item
+      out[out.length - 1] = out[out.length - 1].replace(/<\/li>$/, `<br>${inline(line.trim())}</li>`);
+    } else {
+      closeList();
+      para.push(line);
+    }
+  }
+  flushPara();
+  closeList();
+  return out.join("");
 }
 
 // Buttons for an extension op. The click is the user gesture chrome.management needs,
