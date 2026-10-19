@@ -1987,6 +1987,19 @@ function extractStepFromModelReply(
     action = { ...action, type: `browser_${action.type}` as any };
   }
 
+  // Never show protocol JSON in the chat: drop any {"done":..} / {"action":..} objects
+  // (closed or not) and stray fence markers from the visible reply.
+  for (const obj of extractBalancedJsonObjects(cleanReply)) {
+    if (obj.parsed && typeof obj.parsed === "object" && ("done" in obj.parsed || "action" in obj.parsed)) {
+      cleanReply = cleanReply.replace(obj.raw, "");
+    }
+  }
+  cleanReply = cleanReply
+    .replace(/```(?:json)?\s*```/gi, "")
+    .replace(/```(?:json)?\s*$/gi, "")
+    .replace(/^\s*```\s*$/gm, "")
+    .trim();
+
   if (
     !action &&
     isFirstStep &&
@@ -2153,6 +2166,7 @@ async function handleUserChat(
         '   - For typing into an input: {"done":false,"action":{"type":"browser_type","locator":{"name":"field label","selector":"optional css selector"},"text":"value"}}',
         '   - For scrolling: {"done":false,"action":{"type":"browser_scroll","scroll_direction":"down","scroll_amount":450}}',
         '   - For browser facts that are not on the page (installed extensions/plugins, open tabs): {"done":false,"action":{"type":"browser_info","topic":"extensions"}} (topic is "extensions" or "tabs"). The result appears in Actions Taken So Far; then answer the user from it.',
+        '   - To uninstall, disable or enable an installed extension/plugin: {"done":false,"action":{"type":"browser_extension","op":"uninstall","name":"Phantom"}} (op is "uninstall", "disable" or "enable"; one extension per step; Chrome shows the user a confirmation for uninstalls). Use browser_info first if you need the exact names.',
         '   - When the user goal is complete (or awaiting user sign-in/confirmation), set "done":true and omit "action".',
         "6. Internal chrome:// pages (extensions, settings, history) cannot be read or clicked. Never tell the user to look themselves; use browser_info or navigate elsewhere.",
       ].join("\n");
@@ -2204,6 +2218,14 @@ async function handleUserChat(
 
       if (!parsedAction || done) {
         break;
+      }
+
+      // Extension management goes through chrome.management (Chrome confirms uninstalls with the user)
+      if ((parsedAction.type as string) === "browser_extension") {
+        const { op, name } = parsedAction as any;
+        const outcome = await manageExtension(String(op || ""), String(name || ""));
+        stepHistory.push(`Step ${step}: browser_extension(${op} "${name}") -> ${outcome}`);
+        continue;
       }
 
       // Browser facts are answered locally and fed back to the model; nothing is clicked
@@ -2274,6 +2296,35 @@ async function getBrowserInfo(topic: string): Promise<string> {
     );
   } catch (err: any) {
     return `unavailable: ${err?.message || err}`;
+  }
+}
+
+// Uninstall / disable / enable an extension by (fuzzy) name. Never touches this extension.
+async function manageExtension(op: string, name: string): Promise<string> {
+  if (!["uninstall", "disable", "enable"].includes(op)) return `FAILED: unknown op "${op}"`;
+  const wanted = name.trim().toLowerCase();
+  if (!wanted) return "FAILED: no extension name given";
+  try {
+    const all = (await chrome.management.getAll()).filter(
+      (e) => e.type === "extension" && e.id !== chrome.runtime.id
+    );
+    const match =
+      all.find((e) => e.name.toLowerCase() === wanted) ||
+      all.find((e) => e.name.toLowerCase().startsWith(wanted)) ||
+      all.find((e) => e.name.toLowerCase().includes(wanted));
+    if (!match) return `FAILED: no installed extension matches "${name}". Installed: ${all.map((e) => e.name).join(", ")}`;
+
+    if (op === "uninstall") {
+      await chrome.management.uninstall(match.id, { showConfirmDialog: true });
+      const stillThere = (await chrome.management.getAll()).some((e) => e.id === match.id);
+      return stillThere
+        ? `CANCELLED: the user declined Chrome's confirmation to remove "${match.name}"`
+        : `SUCCESS: "${match.name}" was uninstalled`;
+    }
+    await chrome.management.setEnabled(match.id, op === "enable");
+    return `SUCCESS: "${match.name}" is now ${op}d`;
+  } catch (err: any) {
+    return `FAILED: ${err?.message || err}`;
   }
 }
 
