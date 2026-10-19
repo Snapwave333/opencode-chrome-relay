@@ -31,6 +31,7 @@ interface SessionData {
   messages: ChatMessage[];
   actions: ActionItem[];
   verifiedCount: number;
+  userHue: number; // avatar colour for this chat, picked at random
 }
 
 const statusBadge = document.getElementById("bridge-status-badge") as HTMLElement;
@@ -65,6 +66,9 @@ const deleteDialogTitle = document.getElementById("delete-dialog-title") as HTML
 
 // Sessions state
 const sessions: Map<string, SessionData> = new Map();
+
+// One of 256 hues, spread over the colour wheel, so each chat gets its own user avatar colour
+const randomUserHue = (): number => Math.round((Math.floor(Math.random() * 256) * 360) / 256);
 let activeRunId = "run_1";
 let sessionCounter = 1;
 
@@ -82,6 +86,7 @@ sessions.set("run_1", {
   messages: [],
   actions: [],
   verifiedCount: 0,
+  userHue: randomUserHue(),
 });
 
 // ---------- Mood background ----------
@@ -329,6 +334,7 @@ function renderChatMessages(session: SessionData): void {
     avatar.className = "msg-avatar";
     avatar.innerHTML = getMaterial3Svg(msg.role === "agent" ? "smart_toy" : "person", 15);
     avatar.setAttribute("aria-hidden", "true");
+    if (msg.role === "user") avatar.style.setProperty("--user-hue", String(session.userHue));
 
     const column = document.createElement("div");
     column.className = "msg-column";
@@ -507,6 +513,7 @@ function createNewSession(name?: string): void {
     messages: [],
     actions: [],
     verifiedCount: 0,
+    userHue: randomUserHue(),
   };
 
   sessions.set(runId, newSession);

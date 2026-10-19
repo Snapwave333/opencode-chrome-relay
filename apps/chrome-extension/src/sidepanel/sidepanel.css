@@ -374,3 +374,15 @@ body { background: var(--bg); }
 .model { margin-left: 2px; }
 .model::before { margin-right: 0; width: 7px; height: 7px; }
 .bar { padding: 8px 10px; }
+
+/* Avatars: agent = black with silver ring; user = per-chat hue with silver ring */
+.msg-avatar {
+  background: #0a0a0c;
+  color: #fff;
+  box-shadow: 0 0 0 1.5px #b9bcc4, 0 0 0 2.5px rgba(0, 0, 0, 0.35);
+}
+.msg.agent .msg-avatar { background: #0a0a0c; }
+.msg.user .msg-avatar {
+  background: hsl(var(--user-hue, 210) 70% 48%);
+  color: #fff;
+}
