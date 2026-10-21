@@ -2254,6 +2254,10 @@ async function handleUserChat(
     // Replies that announce a next move but carry no action get re-asked instead of ending the run
     const MAX_NUDGES = 3;
     let nudges = 0;
+    // NIM outages are usually brief (500/503, a stalled model); a step where every model failed
+    // is retried after 5 s, then 10 s, before the run gives up
+    const MAX_NIM_RETRIES = 2;
+    let nimRetries = 0;
 
     for (let step = 1; step <= MAX_STEPS; step++) {
       const runState = activeRuns.get(runId);
@@ -2334,9 +2338,24 @@ async function handleUserChat(
         { role: "user", content: stepContext },
       ]);
       if (!replyText) {
+        const keyRejected = nimError === "API key rejected (401/403)";
+        if (!keyRejected && nimRetries < MAX_NIM_RETRIES) {
+          nimRetries++;
+          const waitMs = nimRetries * 5000;
+          broadcastChatResponse(
+            runId,
+            epoch,
+            `NVIDIA NIM didn't answer (${nimError || "empty reply"}). Retrying in ${waitMs / 1000} s...`,
+            "local"
+          );
+          await new Promise((r) => setTimeout(r, waitMs));
+          step--; // the retry is the same step, not a new one
+          continue;
+        }
         broadcastChatResponse(runId, epoch, `NVIDIA NIM didn't answer: ${nimError || "empty reply"}. Try again in a moment.`, "error");
         break;
       }
+      nimRetries = 0;
 
       const { cleanReply, action: parsedAction, done } = extractStepFromModelReply(
         replyText,

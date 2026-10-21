@@ -12,6 +12,10 @@ export class NativeBridgePort {
   private authTokenRequested = false;
   private connecting: Promise<boolean> | null = null;
   private authenticated = false;
+  // Failed attempts in a row; tab events and sends call connect() constantly, so attempts are
+  // gated to 1.5 s, 3 s, 6 s ... up to 60 s while the broker is down
+  private failures = 0;
+  private nextAttemptAt = 0;
 
   public async connect(): Promise<boolean> {
     this.startKeepAlive();
@@ -19,6 +23,10 @@ export class NativeBridgePort {
       return true;
     }
     if (this.connecting) return this.connecting;
+    if (Date.now() < this.nextAttemptAt) {
+      this.scheduleReconnect();
+      return false;
+    }
     this.connecting = this.openConnection();
     try {
       return await this.connecting;
@@ -39,7 +47,10 @@ export class NativeBridgePort {
       await this.fetchAuthToken();
       this.authTokenRequested = false;
     }
-    if (!this.authToken) return false;
+    if (!this.authToken) {
+      this.noteFailure();
+      return false;
+    }
     
     try {
       const ws = new WebSocket(DEFAULT_BROKER_URL);
@@ -56,6 +67,8 @@ export class NativeBridgePort {
           const parsed = typeof ev.data === "string" ? JSON.parse(ev.data) : ev.data;
           if (parsed?.event === "bridge.connected" && parsed?.status === "authenticated") {
             this.authenticated = true;
+            this.failures = 0;
+            this.nextAttemptAt = 0;
             while (this.pendingQueue.length > 0 && ws.readyState === WebSocket.OPEN) {
               ws.send(this.pendingQueue.shift()!);
             }
@@ -79,14 +92,7 @@ export class NativeBridgePort {
         for (const listener of this.disconnectListeners) {
           listener();
         }
-        // BUG-016 fix: Clear existing timer before setting new one
-        if (this.reconnectTimer) {
-          clearTimeout(this.reconnectTimer);
-        }
-        this.reconnectTimer = setTimeout(() => {
-          this.reconnectTimer = null;
-          this.connect();
-        }, 1500);
+        this.noteFailure();
       };
       ws.onerror = () => {
         // onclose will handle reconnect
@@ -96,6 +102,20 @@ export class NativeBridgePort {
       this.ws = null;
       return this.connectNativeFallback();
     }
+  }
+
+  private noteFailure(): void {
+    this.failures++;
+    this.nextAttemptAt = Date.now() + Math.min(1500 * 2 ** (this.failures - 1), 60000);
+    this.scheduleReconnect();
+  }
+
+  private scheduleReconnect(): void {
+    if (this.reconnectTimer) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connect();
+    }, Math.max(0, this.nextAttemptAt - Date.now()));
   }
 
   private async fetchAuthToken(): Promise<void> {
