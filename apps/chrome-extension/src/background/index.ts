@@ -1851,11 +1851,23 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   }
 });
 
+// Measured 2026-10-21 on agent steps: deepseek-v4.1-flash 3-4.5 s, glm-5.3-flash 3-5 s,
+// glm-5.3 2-20 s, nemotron-3.5-super-vl 1-11 s. (nemotron-3-super 404s, gpt-oss-20b
+// timed out at 120 s, laguna-xs-2.1 took 75 s and sent no action.)
 const ACTIVE_NIM_MODELS = [
-  "nvidia/nemotron-3-super-120b-a12b",
-  "openai/gpt-oss-20b",
-  "poolside/laguna-xs-2.1",
+  "deepseek-ai/deepseek-v4.1-flash",
+  "z-ai/glm-5.3-flash",
+  "z-ai/glm-5.3",
+  "nvidia/nemotron-3.5-super-vl-120b-a12b",
 ];
+
+// The model that last answered is tried first, so one slow or dead model costs a run once, not every step
+let preferredNimModel: string | null = null;
+
+function nimModelOrder(): string[] {
+  if (!preferredNimModel) return ACTIVE_NIM_MODELS;
+  return [preferredNimModel, ...ACTIVE_NIM_MODELS.filter((m) => m !== preferredNimModel)];
+}
 
 // Key shared with OpenCode, fetched from the local native host; kept in memory only
 let opencodeNimKey: string | null = null;
@@ -2017,6 +2029,26 @@ function inferActionFromUserIntent(userText: string): ActionPayload | null {
   return null;
 }
 
+// Models phrase the same action three ways; all become {type, ...fields}:
+//   {"action":{"type":"browser_navigate","url":..}}
+//   {"action":{"name":"browser_navigate","arguments":{"url":..}}}
+//   {"action":{"browser_navigate":{"url":..}}}
+function toActionPayload(parsed: any): ActionPayload | null {
+  const raw = parsed?.action ?? (parsed?.type ? parsed : null);
+  if (!raw || typeof raw !== "object") return null;
+  if (typeof raw.type === "string") return raw as ActionPayload;
+  if (typeof raw.name === "string" && /^(browser_)?[a-z_]+$/.test(raw.name)) {
+    const args = raw.arguments ?? raw.parameters ?? raw.args ?? {};
+    return { ...(typeof args === "object" ? args : {}), type: raw.name } as ActionPayload;
+  }
+  const keys = Object.keys(raw);
+  if (keys.length === 1 && /^browser_[a-z_]+$/.test(keys[0])) {
+    const fields = raw[keys[0]];
+    return { ...(fields && typeof fields === "object" ? fields : {}), type: keys[0] } as ActionPayload;
+  }
+  return null;
+}
+
 function extractStepFromModelReply(
   replyText: string,
   userText: string,
@@ -2035,9 +2067,9 @@ function extractStepFromModelReply(
       if (typeof obj.parsed?.thought === "string" && !cleanReply.replace(match[0], "").trim()) {
         cleanReply = obj.parsed.thought;
       }
-      const candidate = obj.parsed?.action || (obj.parsed?.type ? obj.parsed : null);
-      if (candidate && typeof candidate.type === "string") {
-        action = candidate as ActionPayload;
+      const candidate = toActionPayload(obj.parsed);
+      if (candidate) {
+        action = candidate;
         cleanReply = cleanReply.replace(match[0], "").trim() || obj.parsed?.thought || "";
         break;
       }
@@ -2049,9 +2081,9 @@ function extractStepFromModelReply(
     const objs = extractBalancedJsonObjects(replyText);
     for (const obj of objs) {
       if (typeof obj.parsed?.done === "boolean") done = obj.parsed.done;
-      const candidate = obj.parsed?.action || (obj.parsed?.type ? obj.parsed : null);
-      if (candidate && typeof candidate.type === "string") {
-        action = candidate as ActionPayload;
+      const candidate = toActionPayload(obj.parsed);
+      if (candidate) {
+        action = candidate;
         cleanReply = cleanReply.replace(obj.raw, "").trim() || obj.parsed?.thought || "";
         break;
       }
@@ -2100,14 +2132,15 @@ function extractStepFromModelReply(
   return { cleanReply, action, done };
 }
 
-const NIM_REQUEST_TIMEOUT_MS = 90000;
+// Working models answer a step in 2-11 s; a model still silent at 30 s is moved past
+const NIM_REQUEST_TIMEOUT_MS = 30000;
 
 async function callNvidiaNim(
   apiKey: string,
   messages: Array<{ role: "system" | "user" | "assistant"; content: string }>
 ): Promise<{ content: string; modelUsed: string; error?: string }> {
   let lastError = "no model answered";
-  for (const model of ACTIVE_NIM_MODELS) {
+  for (const model of nimModelOrder()) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), NIM_REQUEST_TIMEOUT_MS);
     try {
@@ -2136,7 +2169,10 @@ async function callNvidiaNim(
       }
       const data: any = await res.json();
       const content = (data?.choices?.[0]?.message?.content || "").trim();
-      if (content) return { content, modelUsed: model };
+      if (content) {
+        preferredNimModel = model;
+        return { content, modelUsed: model };
+      }
       lastError = `${model}: empty reply`;
     } catch (err: any) {
       lastError = `${model}: ${err?.name === "AbortError" ? `timed out after ${NIM_REQUEST_TIMEOUT_MS / 1000} s` : err?.message || err}`;
@@ -2156,10 +2192,10 @@ async function warmNim(): Promise<
   if (!apiKey) return { state: "no_key" };
 
   let detail = "unreachable";
-  for (const model of ACTIVE_NIM_MODELS) {
+  for (const model of nimModelOrder()) {
     const started = Date.now();
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 30000);
+    const timer = setTimeout(() => controller.abort(), 15000);
     try {
       const res = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
         method: "POST",
@@ -2167,7 +2203,10 @@ async function warmNim(): Promise<
         body: JSON.stringify({ model, messages: [{ role: "user", content: "ping" }], max_tokens: 1 }),
         signal: controller.signal,
       });
-      if (res.ok) return { state: "ready", model, ms: Date.now() - started };
+      if (res.ok) {
+        preferredNimModel = model;
+        return { state: "ready", model, ms: Date.now() - started };
+      }
       detail = res.status === 401 || res.status === 403 ? "API key rejected" : `HTTP ${res.status}`;
       if (res.status === 401 || res.status === 403) break;
     } catch {
@@ -2212,6 +2251,9 @@ async function handleUserChat(
 
     const MAX_STEPS = 25;
     const stepHistory: string[] = [];
+    // Replies that announce a next move but carry no action get re-asked instead of ending the run
+    const MAX_NUDGES = 3;
+    let nudges = 0;
 
     for (let step = 1; step <= MAX_STEPS; step++) {
       const runState = activeRuns.get(runId);
@@ -2264,7 +2306,12 @@ async function handleUserChat(
         `Current Tab URL: ${obs.url}`,
         `Current Tab Title: ${obs.title}`,
         obs.headings.length ? `Visible Headings: ${obs.headings.join(" | ")}` : "",
-        stepHistory.length ? `Actions Taken So Far:\n${stepHistory.join("\n")}` : "Actions Taken So Far: (none yet)",
+        stepHistory.length
+          ? `Actions Taken So Far:\n${stepHistory
+              // Full page text only for the last 3 steps; older ones keep their summary line
+              .map((h, i) => (i < stepHistory.length - 3 && h.length > 400 ? `${h.slice(0, 400)} ...(trimmed)` : h))
+              .join("\n")}`
+          : "Actions Taken So Far: (none yet)",
         `Visible Interactive Elements on Page:\n${elementsSummary}`,
       ]
         .filter(Boolean)
@@ -2297,15 +2344,32 @@ async function handleUserChat(
         step === 1
       );
 
+      const announcesMore =
+        !cleanReply ||
+        /^\s*(?:i'll|i will|let me|i'm going to|i am going to|i need to|(?:first|next|now|then),?\s+(?:i|let)|navigating|opening|clicking|typing|searching|scrolling|extracting|checking|reading)\b/i.test(cleanReply) ||
+        /(?:\.\.\.|:)\s*$/.test(cleanReply);
+      const nudge = !parsedAction && !done && announcesMore && nudges < MAX_NUDGES;
+
       const displayMessage =
         cleanReply ||
         (parsedAction?.type === "browser_navigate"
           ? `Step ${step}: Navigating to ${parsedAction.url}...`
           : parsedAction
             ? `Step ${step}: Executing ${parsedAction.type}...`
-            : "Task complete.");
+            : nudge
+              ? ""
+              : "Task complete.");
 
-      broadcastChatResponse(runId, epoch, displayMessage, modelUsed);
+      if (displayMessage) broadcastChatResponse(runId, epoch, displayMessage, modelUsed);
+
+      if (nudge) {
+        nudges++;
+        stepHistory.push(
+          `Step ${step}: you replied "${cleanReply.slice(0, 200)}" but sent no action, so nothing happened. ` +
+            'Send the next action now as a ```json {"done":false,"action":{...}}``` block, or if the goal is fully done, the final answer with {"done":true}.'
+        );
+        continue;
+      }
 
       if (!parsedAction || done) {
         break;
@@ -2341,7 +2405,7 @@ async function handleUserChat(
       const isSimpleNavOnly =
         step === 1 &&
         parsedAction.type === "browser_navigate" &&
-        !/\b(find|create|click|download|enable|fill|type|select|delete|update|and\s+then|then)\b/i.test(
+        !/\b(and|then|find|create|click|download|enable|fill|type|select|delete|update|search|play|watch|read|summari[sz]e|sign|log|check|tell|show|look|add|send|post|write|buy|compare|list)\b|,/i.test(
           userText.replace(/^(?:please\s+)?(?:navigate|navagate|go|open|visit)\s+(?:to\s+)?/i, "")
         );
       if (isSimpleNavOnly) {
