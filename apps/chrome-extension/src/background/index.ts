@@ -1851,22 +1851,28 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   }
 });
 
-// Measured 2026-10-21 on agent steps: deepseek-v4.1-flash 3-4.5 s, glm-5.3-flash 3-5 s,
-// glm-5.3 2-20 s, nemotron-3.5-super-vl 1-11 s. (nemotron-3-super 404s, gpt-oss-20b
-// timed out at 120 s, laguna-xs-2.1 took 75 s and sent no action.)
+// Measured 2026-10-21 on real agent steps (3.5k-7k token prompts), fastest first:
+// nemotron-3.5-lightning 1.3-4 s and 5/5 correct; deepseek-v4.1-flash 9-17 s; glm-5.3 13-20 s;
+// nemotron-3.5-super-vl 1-11 s; glm-5.3-flash 17-34 s (reasons for 1,000+ tokens). Turning
+// lightning's thinking off gets 0.5 s but picked the wrong action 1 time in 3, so it stays on.
+// (nemotron-3-super 404s, gpt-oss-20b timed out at 120 s, laguna-xs-2.1 took 75 s.)
 const ACTIVE_NIM_MODELS = [
+  "nvidia/nemotron-3.5-lightning-30b-a3b",
   "deepseek-ai/deepseek-v4.1-flash",
-  "z-ai/glm-5.3-flash",
   "z-ai/glm-5.3",
   "nvidia/nemotron-3.5-super-vl-120b-a12b",
+  "z-ai/glm-5.3-flash",
 ];
 
-// The model that last answered is tried first, so one slow or dead model costs a run once, not every step
-let preferredNimModel: string | null = null;
+// A model that just failed goes to the back of the line for 2 minutes, so a dead or stalled
+// model costs one step, not every step, and the fast one is tried first again after that
+const NIM_FAILURE_COOLDOWN_MS = 120000;
+const nimCooldownUntil = new Map<string, number>();
 
 function nimModelOrder(): string[] {
-  if (!preferredNimModel) return ACTIVE_NIM_MODELS;
-  return [preferredNimModel, ...ACTIVE_NIM_MODELS.filter((m) => m !== preferredNimModel)];
+  const now = Date.now();
+  const cooling = (m: string) => (nimCooldownUntil.get(m) || 0) > now;
+  return [...ACTIVE_NIM_MODELS.filter((m) => !cooling(m)), ...ACTIVE_NIM_MODELS.filter(cooling)];
 }
 
 // Key shared with OpenCode, fetched from the local native host; kept in memory only
@@ -2165,16 +2171,19 @@ async function callNvidiaNim(
           lastError = "API key rejected (401/403)";
           break;
         }
+        nimCooldownUntil.set(model, Date.now() + NIM_FAILURE_COOLDOWN_MS);
         continue;
       }
       const data: any = await res.json();
       const content = (data?.choices?.[0]?.message?.content || "").trim();
       if (content) {
-        preferredNimModel = model;
+        nimCooldownUntil.delete(model);
         return { content, modelUsed: model };
       }
       lastError = `${model}: empty reply`;
+      nimCooldownUntil.set(model, Date.now() + NIM_FAILURE_COOLDOWN_MS);
     } catch (err: any) {
+      nimCooldownUntil.set(model, Date.now() + NIM_FAILURE_COOLDOWN_MS);
       lastError = `${model}: ${err?.name === "AbortError" ? `timed out after ${NIM_REQUEST_TIMEOUT_MS / 1000} s` : err?.message || err}`;
     } finally {
       clearTimeout(timer);
@@ -2203,10 +2212,7 @@ async function warmNim(): Promise<
         body: JSON.stringify({ model, messages: [{ role: "user", content: "ping" }], max_tokens: 1 }),
         signal: controller.signal,
       });
-      if (res.ok) {
-        preferredNimModel = model;
-        return { state: "ready", model, ms: Date.now() - started };
-      }
+      if (res.ok) return { state: "ready", model, ms: Date.now() - started };
       detail = res.status === 401 || res.status === 403 ? "API key rejected" : `HTTP ${res.status}`;
       if (res.status === 401 || res.status === 403) break;
     } catch {
