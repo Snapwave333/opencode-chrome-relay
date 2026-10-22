@@ -211,39 +211,148 @@ export class CDPController {
     }
   }
 
-  public async setFileInputFiles(tabId: number, selector: string, files: string[]): Promise<boolean> {
+  private waitForEvent(tabId: number, method: string, timeoutMs: number): Promise<any> {
+    return new Promise((resolve, reject) => {
+      const listener = (source: chrome.debugger.Debuggee, eventMethod: string, params?: object) => {
+        if (source.tabId !== tabId || eventMethod !== method) return;
+        done();
+        resolve(params);
+      };
+      const timer = setTimeout(() => {
+        done();
+        reject(new Error(`${method} did not fire within ${timeoutMs / 1000} s`));
+      }, timeoutMs);
+      const done = () => {
+        clearTimeout(timer);
+        chrome.debugger.onEvent.removeListener(listener);
+      };
+      chrome.debugger.onEvent.addListener(listener);
+    });
+  }
+
+  private async setFiles(tabId: number, node: { objectId?: string; backendNodeId?: number }, files: string[]): Promise<void> {
     try {
-      const doc = await this.sendCommand(tabId, "DOM.getDocument");
-      const rootNodeId = doc?.root?.nodeId;
-      if (!rootNodeId) return false;
-
-      const node = await this.sendCommand(tabId, "DOM.querySelector", {
-        nodeId: rootNodeId,
-        selector,
-      });
-
-      if (!node?.nodeId) return false;
-
-      await this.sendCommand(tabId, "DOM.setFileInputFiles", {
-        nodeId: node.nodeId,
-        files,
-      });
-
-      // Dispatch change and input events on input element
-      await this.evaluate(
-        tabId,
-        `(() => {
-          const el = document.querySelector(${JSON.stringify(selector)});
-          if (el) {
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-            el.dispatchEvent(new Event('input', { bubbles: true }));
-          }
-        })()`
-      );
-
-      return true;
-    } catch {
-      return false;
+      await this.sendCommand(tabId, "DOM.setFileInputFiles", { ...node, files });
+    } catch (err: any) {
+      // Chrome only lets an extension's debugger hand local files to a page when it may read file:// URLs
+      if (/not allowed/i.test(err?.message || "") && !(await chrome.extension.isAllowedFileSchemeAccess())) {
+        throw new Error(
+          'Chrome refused to attach local files: open chrome://extensions, click Details on OpenCode Chrome Relay and turn on "Allow access to file URLs"'
+        );
+      }
+      throw err;
     }
   }
+
+  // Puts local files into a page's file input. The locator may name the input itself, an element that
+  // contains or labels one, or a button that opens the file chooser; with no locator the page's first
+  // file input (or upload button) is used.
+  public async uploadFiles(
+    tabId: number,
+    locator: { selector?: string; name?: string; text?: string } | undefined,
+    files: string[]
+  ): Promise<{ via: string; fileNames: string[] }> {
+    const selector = locator?.selector || null;
+    const name = locator?.name || locator?.text || null;
+    const found = await this.sendCommand(tabId, "Runtime.evaluate", {
+      expression: `(${findUploadTarget.toString()})(${JSON.stringify(selector)}, ${JSON.stringify(name)})`,
+      returnByValue: false,
+    });
+    if (found?.exceptionDetails) {
+      throw new Error(found.exceptionDetails.exception?.description || found.exceptionDetails.text || "Upload target lookup failed");
+    }
+    const objectId: string | undefined = found?.result?.objectId;
+    if (!objectId) {
+      throw new Error(
+        selector || name
+          ? `No upload target matches ${selector ? `selector ${selector}` : `"${name}"`}`
+          : "No <input type=file> or upload button on this page; pass the selector or label of the upload control"
+      );
+    }
+
+    const callOn = async (id: string, fn: string, userGesture = false) =>
+      (await this.sendCommand(tabId, "Runtime.callFunctionOn", {
+        objectId: id,
+        functionDeclaration: fn,
+        returnByValue: true,
+        userGesture,
+      }))?.result?.value;
+
+    const isFileInput = await callOn(objectId, "function () { return this instanceof HTMLInputElement && this.type === 'file'; }");
+    let inputObjectId = objectId;
+    let via = "file input";
+    if (isFileInput) {
+      await this.setFiles(tabId, { objectId }, files);
+    } else {
+      via = "file chooser";
+      await this.sendCommand(tabId, "Page.enable");
+      await this.sendCommand(tabId, "Page.setInterceptFileChooserDialog", { enabled: true });
+      try {
+        const opened = this.waitForEvent(tabId, "Page.fileChooserOpened", 8000);
+        await callOn(objectId, "function () { this.scrollIntoView({ block: 'center' }); this.click(); }", true);
+        const chooser = await opened.catch(() => {
+          throw new Error("Clicking the upload control did not open a file chooser; pass the selector of the file input instead");
+        });
+        if (!chooser?.backendNodeId) throw new Error("The file chooser did not report its input element");
+        await this.setFiles(tabId, { backendNodeId: chooser.backendNodeId }, files);
+        const resolved = await this.sendCommand(tabId, "DOM.resolveNode", { backendNodeId: chooser.backendNodeId });
+        inputObjectId = resolved?.object?.objectId || objectId;
+      } finally {
+        await this.sendCommand(tabId, "Page.setInterceptFileChooserDialog", { enabled: false }).catch(() => {});
+      }
+    }
+
+    const fileNames: string[] =
+      (await callOn(inputObjectId, "function () { return Array.from(this.files || []).map((f) => f.name); }")) || [];
+    return { via, fileNames };
+  }
+}
+
+// Runs in the page. Searches open shadow roots too, since upload widgets often live in them.
+function findUploadTarget(selector: string | null, name: string | null): Element | null {
+  const deepAll = (root: ParentNode, sel: string): Element[] => {
+    const out = Array.from(root.querySelectorAll(sel));
+    for (const el of Array.from(root.querySelectorAll("*"))) {
+      if (el.shadowRoot) out.push(...deepAll(el.shadowRoot, sel));
+    }
+    return out;
+  };
+  const isFileInput = (el: unknown): el is HTMLInputElement => el instanceof HTMLInputElement && el.type === "file";
+  const fileInputFor = (el: Element): HTMLInputElement | null => {
+    if (isFileInput(el)) return el;
+    if (el instanceof HTMLLabelElement && isFileInput(el.control)) return el.control;
+    const inside = deepAll(el, 'input[type="file"]')[0] || (el.shadowRoot && deepAll(el.shadowRoot, 'input[type="file"]')[0]);
+    return (inside as HTMLInputElement) || null;
+  };
+  const byLabel = (pattern: (label: string) => boolean): Element | null => {
+    const matches = deepAll(document, 'input[type="file"], button, label, a, [role="button"]').filter((el) => {
+      const label = [(el as HTMLElement).innerText, el.getAttribute("aria-label"), el.getAttribute("title"), el.getAttribute("name")]
+        .filter(Boolean)
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLowerCase();
+      return label && pattern(label);
+    });
+    // The tightest match is the control itself rather than a wrapper around it
+    matches.sort((a, b) => ((a as HTMLElement).innerText || "").length - ((b as HTMLElement).innerText || "").length);
+    return matches[0] || null;
+  };
+
+  let target: Element | null = null;
+  if (selector) {
+    try {
+      target = deepAll(document, selector)[0] || null;
+    } catch {
+      throw new Error(`Invalid CSS selector: ${selector}`);
+    }
+  } else if (name) {
+    const want = name.trim().toLowerCase();
+    target = byLabel((label) => label.includes(want));
+  } else {
+    target =
+      deepAll(document, 'input[type="file"]')[0] ||
+      byLabel((label) => /\b(upload|choose files?|select files?|browse|attach|add files?)\b/.test(label));
+  }
+  return target ? fileInputFor(target) || target : null;
 }

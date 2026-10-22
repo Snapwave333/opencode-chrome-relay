@@ -1,4 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { browserTools } from "../../packages/opencode-plugin/src/tools.js";
 import { RelayBrokerClient } from "../../packages/opencode-plugin/src/client.js";
 
@@ -34,24 +37,31 @@ describe("OpenCode Plugin Browser Tools", () => {
   });
 
   it("browser_upload sends file upload action with selector and file_paths", async () => {
+    const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "relay-upload-")), "test.pdf");
+    fs.writeFileSync(file, "%PDF-1.4");
     const mockClient = {
-      sendAction: vi.fn().mockResolvedValue({ success: true, uploaded_files: ["C:/test.pdf"], verified: true }),
+      sendAction: vi.fn().mockResolvedValue({ success: true, uploaded_files: [file], verified: true }),
     } as unknown as RelayBrokerClient;
 
     const uploadTool = browserTools["browser_upload"];
-    const result = await uploadTool.execute(
-      { file_paths: ["C:/test.pdf"], selector: "#file-input" },
-      mockClient
-    );
+    const result = await uploadTool.execute({ file_paths: [file], selector: "#file-input" }, mockClient);
 
     expect(result.success).toBe(true);
     expect(mockClient.sendAction).toHaveBeenCalledWith({
       type: "browser_upload",
-      file_paths: ["C:/test.pdf"],
-      locator: { selector: "#file-input" },
+      file_paths: [file],
+      locator: { selector: "#file-input", name: undefined },
       risk: "non_sensitive_mutation",
       is_irreversible: false,
     });
+  });
+
+  it("browser_upload rejects missing files before reaching the browser", async () => {
+    const mockClient = { sendAction: vi.fn() } as unknown as RelayBrokerClient;
+    await expect(
+      browserTools["browser_upload"].execute({ file_paths: [path.join(os.tmpdir(), "no-such-file.pdf")] }, mockClient)
+    ).rejects.toThrow(/File not found/);
+    expect(mockClient.sendAction).not.toHaveBeenCalled();
   });
 
   it("browser_click sends an action with external_effect risk and locator", async () => {

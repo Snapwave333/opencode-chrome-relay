@@ -509,8 +509,9 @@ CORE COMMANDS (Deterministic Direct Execution):
   verify <selector|text>         Check if a selector or text exists on the current page
   screenshot [output.png]        Capture a PNG screenshot via CDP and save to disk
   pdf [output.pdf]               Generate and save a PDF document of the page via CDP
-  download <url> [filename]      Download a URL using your logged-in Chrome cookies
-  upload <selector> <files...>   Upload local files into a file input element
+  download <url|target> [dest]   Download a URL (or click a link/button) with your Chrome cookies;
+                                 waits until saved, then moves it to dest (file or folder) if given
+  upload [target] <files...>     Attach local files to a file input or Upload button (no OS dialog)
   save-dialog                    Confirm and dismiss native OS Save As / download dialogue box
 
 INTERACTIVE & AUTOMATION UTILITIES:
@@ -1198,26 +1199,73 @@ export async function runCli(argv = process.argv.slice(2), existingWs?: WebSocke
     }
 
     case "download": {
-      const url = positionals[0];
-      if (!url) throw new Error("Usage: browser-relay download <url> [filename]");
-      action = {
-        type: "browser_download",
-        url,
-        download_path: positionals[1],
-        risk: "non_sensitive_mutation",
-        is_irreversible: false,
-      };
-      break;
+      const source = positionals[0];
+      if (!source) throw new Error("Usage: browser-relay download <url|link-or-button> [dest]");
+      // Anything that is not URL-shaped is the link or button to click, e.g. "Export CSV" or "#dl"
+      const isUrl =
+        /^(https?|ftp|data|blob|file):/i.test(source) ||
+        /^\.{0,2}\//.test(source) ||
+        /^[\w-]+(\.[\w-]+)+\/\S*$/.test(source);
+      let dest = positionals[1] ? path.resolve(process.cwd(), positionals[1]) : undefined;
+      const destIsDir =
+        !!dest && (/[\\/]$/.test(positionals[1]) || (fs.existsSync(dest) && fs.statSync(dest).isDirectory()));
+      // Chrome waits for the whole file, so the CLI allows at least 2 minutes for it
+      const downloadTimeout = Math.max(options.timeoutMs, 120000);
+      const outcome = await executeRelayAction(
+        {
+          type: "browser_download",
+          ...(isUrl
+            ? { url: /^[\w-]+(\.[\w-]+)+\//.test(source) ? `https://${source}` : source }
+            : { locator: buildLocatorFromArg(source) }),
+          download_path: dest && !destIsDir ? path.basename(dest) : undefined,
+          timeout_ms: downloadTimeout,
+          risk: "non_sensitive_mutation",
+          is_irreversible: false,
+        },
+        { ...options, timeoutMs: downloadTimeout + 15000 },
+        existingWs
+      );
+      let savedTo: string | undefined = outcome?.filename;
+      if (dest && savedTo) {
+        if (destIsDir) dest = path.join(dest, path.basename(savedTo));
+        if (path.resolve(savedTo) !== dest) {
+          fs.mkdirSync(path.dirname(dest), { recursive: true });
+          try {
+            fs.renameSync(savedTo, dest);
+          } catch (err: any) {
+            if (err?.code !== "EXDEV") throw err;
+            fs.copyFileSync(savedTo, dest);
+            fs.unlinkSync(savedTo);
+          }
+          savedTo = dest;
+        }
+      }
+      if (options.json) {
+        console.log(JSON.stringify({ ...outcome, filename: savedTo }, null, 2));
+      } else {
+        const size = typeof outcome?.bytes === "number" ? ` (${outcome.bytes} bytes)` : "";
+        console.log(`⬇️ Saved ${savedTo || "(unknown path)"}${size}`);
+      }
+      return;
     }
 
     case "upload": {
-      if (positionals.length < 2) {
-        throw new Error("Usage: browser-relay upload <selector> <file1> [file2...]");
+      // `upload <files...>` uses the page's file input; `upload <target> <files...>` names the input or button
+      const firstIsFile = positionals.length > 0 && fs.existsSync(path.resolve(process.cwd(), positionals[0]));
+      const target = firstIsFile ? undefined : positionals[0];
+      const files = (firstIsFile ? positionals : positionals.slice(1)).map((p) => path.resolve(process.cwd(), p));
+      if (positionals.length === 1 && !firstIsFile) {
+        throw new Error(`File not found: ${path.resolve(process.cwd(), positionals[0])}`);
       }
+      if (files.length === 0) {
+        throw new Error("Usage: browser-relay upload [selector|label] <file1> [file2...]");
+      }
+      const missing = files.filter((f) => !fs.existsSync(f) || !fs.statSync(f).isFile());
+      if (missing.length) throw new Error(`File not found: ${missing.join(", ")}`);
       action = {
         type: "browser_upload",
-        locator: { selector: positionals[0] },
-        file_paths: positionals.slice(1).map((p) => path.resolve(process.cwd(), p)),
+        ...(target ? { locator: buildLocatorFromArg(target) } : {}),
+        file_paths: files,
         risk: "external_effect",
         is_irreversible: false,
       };

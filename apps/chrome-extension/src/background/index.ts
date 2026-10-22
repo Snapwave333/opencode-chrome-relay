@@ -18,15 +18,70 @@ if (chrome.tabs) {
   chrome.tabs.onActivated?.addListener(() => nativePort.connect());
 }
 
-// Suppress and auto-accept native Save As file dialogs for seamless agent downloads
+// Names asked for by browser_download, keyed by URL. An onDeterminingFilename listener overrides the
+// filename given to chrome.downloads.download(), so the listener has to hand it back itself.
+const requestedDownloadNames = new Map<string, string>();
+
 if (typeof chrome !== "undefined" && chrome.downloads?.onDeterminingFilename) {
   chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+    const requested = item.byExtensionId === chrome.runtime.id ? requestedDownloadNames.get(item.url) : undefined;
+    if (requested) requestedDownloadNames.delete(item.url);
     suggest({
-      filename: item.filename,
+      filename: requested || item.filename,
       conflictAction: "uniquify",
     });
     return true;
   });
+}
+
+// chrome.downloads saves only inside the Downloads folder, so a requested path becomes a name relative to it
+function toDownloadsRelativeName(requested?: string): string | undefined {
+  if (!requested) return undefined;
+  const normalized = requested.replace(/\\/g, "/");
+  const parts = normalized
+    .split("/")
+    .filter((part) => part && part !== "." && part !== "..")
+    .map((part) => part.replace(/[<>:"|?*\x00-\x1f]/g, "_"));
+  if (/^([a-zA-Z]:)?\//.test(normalized)) return parts[parts.length - 1];
+  return parts.join("/") || undefined;
+}
+
+async function waitForDownloadDone(id: number, timeoutMs: number): Promise<chrome.downloads.DownloadItem> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = async (error?: string) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      chrome.downloads.onChanged.removeListener(onChanged);
+      if (error) reject(new Error(error));
+      else resolve((await chrome.downloads.search({ id }))[0]);
+    };
+    const onChanged = (delta: chrome.downloads.DownloadDelta) => {
+      if (delta.id !== id || !delta.state) return;
+      if (delta.state.current === "complete") finish();
+      else if (delta.state.current === "interrupted") finish(`Download interrupted: ${delta.error?.current || "unknown error"}`);
+    };
+    const timer = setTimeout(async () => {
+      const [item] = await chrome.downloads.search({ id });
+      const total = item && item.totalBytes > 0 ? item.totalBytes : "?";
+      finish(
+        `Download still running after ${timeoutMs / 1000} s (${item?.bytesReceived ?? 0} of ${total} bytes); it keeps going in Chrome's downloads`
+      );
+    }, timeoutMs);
+    chrome.downloads.onChanged.addListener(onChanged);
+    // A small file can finish before the listener is in place
+    chrome.downloads.search({ id }).then(([item]) => {
+      if (item?.state === "complete") finish();
+      else if (item?.state === "interrupted") finish(`Download interrupted: ${item.error || "unknown error"}`);
+    });
+  });
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 // Auto-handle JavaScript alert/confirm/prompt dialogs via CDP so tab threads don't block
@@ -1238,48 +1293,99 @@ async function handleActionRequest(
       }
 
       case "browser_download": {
+        const timeoutMs = Math.max(Number(action.timeout_ms) || 120000, 1000);
+        const filename = toDownloadsRelativeName(action.download_path);
+        let downloadId: number;
         if (action.url) {
-          const downloadId = await new Promise<number>((resolve, reject) => {
-            chrome.downloads.download(
-              {
-                url: action.url!,
-                filename: action.download_path,
-                saveAs: false,
+          let url = action.url;
+          try {
+            url = new URL(url, (await chrome.tabs.get(tabId)).url).href;
+          } catch {
+            // Not resolvable against the tab; let chrome.downloads judge the URL as given
+          }
+          if (url.startsWith("blob:")) {
+            // A blob URL only resolves inside the page that created it, so read it there
+            const [res] = await chrome.scripting.executeScript({
+              target: { tabId },
+              world: "MAIN",
+              func: async (blobUrl: string) => {
+                const blob = await (await fetch(blobUrl)).blob();
+                return await new Promise<string>((resolve, reject) => {
+                  const reader = new FileReader();
+                  reader.onload = () => resolve(reader.result as string);
+                  reader.onerror = () => reject(reader.error);
+                  reader.readAsDataURL(blob);
+                });
               },
-              (id) => {
-                if (chrome.runtime.lastError) {
-                  reject(new Error(chrome.runtime.lastError.message));
-                } else {
-                  resolve(id);
-                }
-              }
-            );
-          });
-          outcome = {
-            success: true,
-            verified: true,
-            download_id: downloadId,
-            url: action.url,
-            outcome_summary: `Downloaded ${action.url}`,
-          };
+              args: [url],
+            });
+            if (!res?.result) throw new Error(`Could not read ${url} from the page`);
+            url = res.result;
+          }
+          if (filename) requestedDownloadNames.set(url, filename);
+          try {
+            downloadId = await chrome.downloads.download({ url, filename, saveAs: false });
+          } catch (err: any) {
+            requestedDownloadNames.delete(url);
+            throw new Error(`Chrome would not start the download: ${err?.message || err}`);
+          }
+        } else if (action.locator) {
+          // Click the link or button that starts the download and catch the download it creates
+          const createdIds: number[] = [];
+          const onCreated = (item: chrome.downloads.DownloadItem) => createdIds.push(item.id);
+          chrome.downloads.onCreated.addListener(onCreated);
+          try {
+            const click = await handleActionRequest({
+              ...envelope,
+              idempotency_key: `${envelope.idempotency_key}_click`,
+              action: { ...action, type: "browser_click" },
+            });
+            if (!click.success) throw new Error(`Could not click the download control: ${click.summary}`);
+            const deadline = Date.now() + 15000;
+            while (!createdIds.length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 250));
+          } finally {
+            chrome.downloads.onCreated.removeListener(onCreated);
+          }
+          if (!createdIds.length) throw new Error("The click did not start a download within 15 s");
+          downloadId = createdIds[0];
         } else {
-          sendActionFailed(envelope, "Missing url for browser_download");
-          return { success: false, summary: "Missing url for browser_download", tabId };
+          throw new Error("browser_download needs a url, or a locator for the link or button that starts the download");
         }
+        const item = await waitForDownloadDone(downloadId, timeoutMs);
+        const bytes = item.fileSize || item.bytesReceived;
+        outcome = {
+          success: true,
+          verified: true,
+          download_id: downloadId,
+          url: item.finalUrl || item.url,
+          filename: item.filename,
+          bytes,
+          mime: item.mime,
+          outcome_summary: `Downloaded ${formatBytes(bytes)} to ${item.filename}`,
+        };
         break;
       }
 
       case "browser_upload": {
-        const uploadSelector = action.locator?.selector || 'input[type="file"]';
         const files = action.file_paths || [];
-        if (files.length === 0) {
-          sendActionFailed(envelope, "No file_paths specified for browser_upload");
-          return { success: false, summary: "No file_paths specified", tabId };
+        if (files.length === 0) throw new Error("browser_upload needs file_paths (absolute paths of local files)");
+        const relative = files.filter((f) => !/^([a-zA-Z]:[\\/]|\/|\\\\)/.test(f));
+        if (relative.length) throw new Error(`browser_upload needs absolute file paths, got: ${relative.join(", ")}`);
+        if (!tabManager.isAttached(tabId) && !(await tabManager.attachTab(tabId))) {
+          throw new Error("Could not attach the debugger to this tab, which uploads need");
         }
-        let hasCdp = tabManager.isAttached(tabId);
-        if (!hasCdp) hasCdp = await tabManager.attachTab(tabId);
-        const uploadSuccess = hasCdp ? await cdp.setFileInputFiles(tabId, uploadSelector, files) : false;
-        outcome = { success: uploadSuccess, verified: uploadSuccess, uploaded_files: files };
+        const { via, fileNames } = await cdp.uploadFiles(tabId, action.locator, files);
+        // Many sites read the files on "change" and then clear the input, so an empty input is not a failure
+        const note = fileNames.length
+          ? `input now holds ${fileNames.join(", ")}`
+          : "the page read and cleared the input; check the page shows the upload";
+        outcome = {
+          success: true,
+          verified: fileNames.length > 0,
+          uploaded_files: files,
+          input_files: fileNames,
+          outcome_summary: `Attached ${files.length} file(s) via ${via}; ${note}`,
+        };
         break;
       }
 
@@ -2304,7 +2410,8 @@ async function handleUserChat(
         "- browser_type: locator, text (replaces the field's content) | browser_keypress: text (Enter, Escape, Tab, ctrl+a ...) | browser_select: locator, value",
         "- browser_scroll: scroll_direction (up|down), scroll_amount (px) | browser_wait: timeout_ms, optional locator or text to wait for",
         "- browser_extract: optional locator.selector -> page text and links | browser_eval: text (JS expression) -> its result | browser_verify: text or locator",
-        "- browser_download: url, optional download_path | browser_screenshot",
+        "- browser_download: url (or locator of the link/button that starts the download), optional download_path (name inside Downloads) -> waits until saved and reports the local path | browser_screenshot",
+        "- browser_upload: file_paths (array of absolute local paths), optional locator of the file input or Upload button -> attaches the files without opening the OS dialog",
         "- browser_info: topic (extensions|tabs|history|bookmarks|downloads), optional query -> facts about the browser",
         "- browser_extension: op (uninstall|disable|enable), name -> the user confirms with one click; one extension per step",
         "locator = {\"name\": \"visible label\"} and/or {\"selector\": \"css\"}. Example: {\"done\":false,\"action\":{\"type\":\"browser_click\",\"locator\":{\"name\":\"Sign in\"}}}",

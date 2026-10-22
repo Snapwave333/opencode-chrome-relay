@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { RelayBrokerClient } from "./client.js";
 import { ElementLocator, RiskLevel } from "@opencode/chrome-relay-protocol";
 import { SessionContextManager } from "./session.js";
@@ -427,20 +429,25 @@ export const browserTools: Record<string, ToolDefinition> = {
 
   browser_download: {
     name: "browser_download",
-    description: "Download authorized file or resource from page flawlessly to local downloads.",
+    description:
+      "Download a file with the user's Chrome session (cookies, login). Give a url, or the selector/label of the link or button that starts the download. Waits until the file is saved and returns its local path in `filename`.",
     parameters: {
       type: "object",
-      required: ["url"],
       properties: {
-        url: { type: "string", description: "URL to download" },
-        download_path: { type: "string", description: "Optional local destination filename" },
+        url: { type: "string", description: "URL to download (absolute, page-relative, or blob:)" },
+        selector: { type: "string", description: "CSS selector of the link/button to click instead of a url" },
+        name: { type: "string", description: "Visible label of the link/button to click instead of a url" },
+        download_path: { type: "string", description: "Optional file name inside Chrome's Downloads folder" },
+        timeout_ms: { type: "number", description: "How long to wait for the download to finish (default 120000)" },
       },
     },
     execute: async (args, client) => {
       return client.sendAction({
         type: "browser_download",
         url: args.url,
+        ...(args.url ? {} : { locator: { selector: args.selector, name: args.name } }),
         download_path: args.download_path,
+        timeout_ms: args.timeout_ms || 120000,
         risk: "sensitive_action",
         is_irreversible: true,
       });
@@ -449,20 +456,25 @@ export const browserTools: Record<string, ToolDefinition> = {
 
   browser_upload: {
     name: "browser_upload",
-    description: "Upload local file(s) into a file input element on the active page flawlessly.",
+    description:
+      "Attach local file(s) to a file input on the active page without the OS file dialog. Target the input itself, or the Upload/Browse button that opens the file chooser; with neither, the page's first file input is used.",
     parameters: {
       type: "object",
       required: ["file_paths"],
       properties: {
-        file_paths: { type: "array", items: { type: "string" }, description: "Absolute paths to local files to upload" },
-        selector: { type: "string", description: "CSS selector for input[type='file'] element" },
+        file_paths: { type: "array", items: { type: "string" }, description: "Paths to local files to upload" },
+        selector: { type: "string", description: "CSS selector of the file input or upload button" },
+        name: { type: "string", description: "Visible label of the upload button, e.g. 'Upload photo'" },
       },
     },
     execute: async (args, client) => {
+      const files: string[] = (args.file_paths || []).map((p: string) => path.resolve(p));
+      const missing = files.filter((f) => !fs.existsSync(f) || !fs.statSync(f).isFile());
+      if (missing.length) throw new Error(`File not found: ${missing.join(", ")}`);
       return client.sendAction({
         type: "browser_upload",
-        file_paths: args.file_paths,
-        locator: { selector: args.selector || "input[type='file']" },
+        file_paths: files,
+        ...(args.selector || args.name ? { locator: { selector: args.selector, name: args.name } } : {}),
         risk: "non_sensitive_mutation",
         is_irreversible: false,
       });

@@ -159,9 +159,10 @@ export class RelayBrokerClient {
         return reject(new Error("Relay broker WebSocket is not connected"));
       }
 
+      // The extension uses timeout_ms itself, so the broker reply needs a little longer
       const timeout = setTimeout(() => {
         reject(new Error(`Action timeout waiting for broker response (${action.type})`));
-      }, Math.max(action.timeout_ms || 30000, 10000));
+      }, Math.max((action.timeout_ms || 30000) + 5000, 10000));
 
       const responseHandler = (data: WebSocket.RawData) => {
         try {
