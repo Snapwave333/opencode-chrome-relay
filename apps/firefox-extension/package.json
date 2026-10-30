@@ -1,0 +1,18 @@
+{
+  "name": "opencode-firefox-relay-extension",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@opencode/chrome-relay-protocol": "*"
+  },
+  "devDependencies": {
+    "chrome-types": "^0.1.28",
+    "@types/chrome": "^0.0.268",
+    "esbuild": "^0.28.2"
+  }
+}
