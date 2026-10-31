@@ -7,25 +7,31 @@ interface JsonlRequest {
   params?: Record<string, any>;
 }
 
-export async function runJsonlGateway(): Promise<void> {
-  const gateway = new AgentGateway();
-  const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
+export function resolveJsonlConcurrency(raw = process.env.RELAY_JSONL_CONCURRENCY): number {
+  const parsed = Number.parseInt(raw || "", 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 8;
+}
 
-  for await (const line of input) {
-    if (!line.trim()) continue;
-    let request: JsonlRequest;
-    try {
-      request = JSON.parse(line);
-    } catch {
-      process.stdout.write(`${JSON.stringify({ ok: false, error: "Invalid JSON" })}\n`);
-      continue;
-    }
+export async function runJsonlGateway(
+  options: {
+    gateway?: AgentGateway;
+    input?: NodeJS.ReadableStream;
+    write?: (line: string) => void;
+    concurrency?: number;
+  } = {}
+): Promise<void> {
+  const gateway = options.gateway ?? new AgentGateway();
+  const write = options.write ?? ((line: string) => void process.stdout.write(line));
+  const limit = options.concurrency ?? resolveJsonlConcurrency();
+  const input = createInterface({ input: options.input ?? process.stdin, crlfDelay: Infinity });
+  const inFlight = new Set<Promise<void>>();
 
+  const handle = async (request: JsonlRequest) => {
     try {
       const result = await dispatchJsonlRequest(gateway, request);
-      process.stdout.write(`${JSON.stringify({ id: request.id, ok: true, result })}\n`);
+      write(`${JSON.stringify({ id: request.id, ok: true, result })}\n`);
     } catch (error) {
-      process.stdout.write(
+      write(
         `${JSON.stringify({
           id: request.id,
           ok: false,
@@ -33,9 +39,27 @@ export async function runJsonlGateway(): Promise<void> {
         })}\n`
       );
     }
+  };
+
+  for await (const line of input) {
+    if (!line.trim()) continue;
+    let request: JsonlRequest;
+    try {
+      request = JSON.parse(line);
+    } catch {
+      write(`${JSON.stringify({ ok: false, error: "Invalid JSON" })}\n`);
+      continue;
+    }
+
+    while (inFlight.size >= limit) {
+      await Promise.race(inFlight);
+    }
+    const task = handle(request).finally(() => inFlight.delete(task));
+    inFlight.add(task);
   }
 
-  gateway.disconnect();
+  await Promise.all(inFlight);
+  await gateway.shutdown();
 }
 
 export async function dispatchJsonlRequest(

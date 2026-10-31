@@ -38,7 +38,11 @@ export async function runMcpGateway(): Promise<void> {
   });
 
   const transport = new StdioServerTransport();
-  process.once("SIGINT", () => gateway.disconnect());
-  process.once("SIGTERM", () => gateway.disconnect());
+  const shutdown = () => {
+    void gateway.shutdown().finally(() => process.exit(0));
+  };
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
+  server.onclose = () => void gateway.shutdown();
   await server.connect(transport);
 }

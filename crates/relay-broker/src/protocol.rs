@@ -65,6 +65,8 @@ pub struct ActionPayload {
     pub timeout_ms: Option<u64>,
     pub scroll_direction: Option<String>,
     pub scroll_amount: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<bool>,
     #[serde(default = "default_risk")]
     pub risk: RiskLevel,
     #[serde(default)]

@@ -8,6 +8,10 @@ export * from "./jsonl.js";
 
 const args = new Set(process.argv.slice(2));
 
+if (args.has("--isolate-tab")) {
+  process.env.RELAY_ISOLATE_TAB = "1";
+}
+
 if (args.has("--manifest")) {
   process.stdout.write(`${JSON.stringify({ version: 1, tools: getGatewayTools() }, null, 2)}\n`);
 } else if (args.has("--jsonl")) {

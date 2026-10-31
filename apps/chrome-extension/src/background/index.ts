@@ -1,6 +1,7 @@
 import { NativeBridgePort } from "./native_port.js";
 import { TabManager } from "./tab_manager.js";
 import { CDPController } from "./cdp_controller.js";
+import { KeyedSerialQueue } from "./keyed_queue.js";
 import { ProtocolEnvelope, ActionPayload } from "@opencode/chrome-relay-protocol";
 
 declare const __NVIDIA_API_KEY__: string | undefined;
@@ -8,6 +9,14 @@ declare const __NVIDIA_API_KEY__: string | undefined;
 const nativePort = new NativeBridgePort();
 const tabManager = new TabManager();
 const cdp = new CDPController();
+const tabActionQueue = new KeyedSerialQueue();
+const TAB_AGNOSTIC_ACTIONS = new Set(["browser_list_tabs", "browser_new_tab", "browser_status"]);
+
+function runTabScoped<T>(envelope: ProtocolEnvelope, task: () => Promise<T>): Promise<T> {
+  if (envelope.action && TAB_AGNOSTIC_ACTIONS.has(envelope.action.type)) return task();
+  const key = envelope.tab_id ? `tab:${envelope.tab_id}` : "tab:active";
+  return tabActionQueue.run(key, task);
+}
 cdp.setOnDetachHandler((tabId) => tabManager.markDetached(tabId));
 
 // Connect to native host upon service worker startup
@@ -90,7 +99,7 @@ nativePort.onMessage(async (msg: ProtocolEnvelope) => {
         if (first) handledIdempotencyKeys.delete(first);
       }
     }
-    await handleActionRequest(msg);
+    await runTabScoped(msg, () => handleActionRequest(msg));
   } else if (
     msg.event === "run.state_changed" &&
     (msg.payload as any)?.command === "steer" &&
@@ -158,6 +167,7 @@ function normalizeUrl(rawUrl: string): string {
     .trim();
 
   if (/^https?:\/\//i.test(cleaned)) return cleaned;
+  if (/^about:blank$/i.test(cleaned)) return "about:blank";
   if (/^localhost(:\d+)?(\/.*)?$/i.test(cleaned) || /^127\.0\.0\.1(:\d+)?(\/.*)?$/i.test(cleaned)) {
     return `http://${cleaned}`;
   }
@@ -255,9 +265,9 @@ async function handleActionRequest(
   if (action.type === "browser_new_tab") {
     try {
       const targetUrl = action.url ? normalizeUrl(action.url) : "https://www.google.com";
-      const created = await chrome.tabs.create({ url: targetUrl, active: true });
+      const created = await chrome.tabs.create({ url: targetUrl, active: !action.background });
       if (created.id) await waitForTabComplete(created.id);
-      const summary = `Opened new tab (${created.id}) at ${targetUrl}`;
+      const summary = `Opened ${action.background ? "background " : ""}tab (${created.id}) at ${targetUrl}`;
       sendActionFinished(envelope, {
         success: true,
         verified: true,
@@ -392,10 +402,10 @@ async function handleActionRequest(
     try {
       const targetUrl = normalizeUrl(action.url);
       if (tabId) {
-        await chrome.tabs.update(tabId, { url: targetUrl, active: true });
+        await chrome.tabs.update(tabId, action.background ? { url: targetUrl } : { url: targetUrl, active: true });
         await waitForTabComplete(tabId);
       } else {
-        const created = await chrome.tabs.create({ url: targetUrl, active: true });
+        const created = await chrome.tabs.create({ url: targetUrl, active: !action.background });
         tabId = created.id;
         if (tabId) await waitForTabComplete(tabId);
       }
@@ -2230,7 +2240,7 @@ async function dispatchBrowserAction(
     // Sidepanel closed
   }
   nativePort.send(actionEnvelope);
-  return await handleActionRequest(actionEnvelope);
+  return await runTabScoped(actionEnvelope, () => handleActionRequest(actionEnvelope));
 }
 
 function broadcastChatResponse(runId: string, epoch: number, text: string, model: string): void {

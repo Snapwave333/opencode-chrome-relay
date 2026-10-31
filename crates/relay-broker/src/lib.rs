@@ -1,6 +1,7 @@
 pub mod db;
 pub mod policy;
 pub mod protocol;
+pub mod router;
 pub mod scheduler;
 pub mod server;
 pub mod state_machine;
@@ -147,6 +148,7 @@ mod tests {
                 timeout_ms: None,
                 scroll_direction: None,
                 scroll_amount: None,
+                background: None,
                 risk: RiskLevel::ReadOnly,
                 is_irreversible: false,
             }),

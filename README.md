@@ -229,6 +229,49 @@ npm run gateway:manifest
 
 ---
 
+## 🔀 Running Multiple Agents Concurrently
+
+Several LMs and automation pipelines can drive the relay at the same time. Give each one its own tab so they never fight over the focused tab:
+
+| Layer | Behavior |
+| --- | --- |
+| Broker | Each `action.finished` / `action.failed` is routed only to the connection that requested it, so agents never receive each other's results or screenshots. Tabs are leased per run, so a second run trying to use the same tab fails fast with `leased by another run` |
+| Extension | Actions on the same tab run strictly in order; actions on different tabs run in parallel |
+| Client / gateway | Run IDs are random UUIDs and idempotency keys are salted per process, so parallel or restarted agents never collide |
+
+**MCP / JSONL gateway:** one dedicated background tab per gateway process, opened on the first tab-scoped tool call and closed on shutdown:
+
+```bash
+RELAY_ISOLATE_TAB=1 npm run gateway
+```
+
+```bash
+node packages/agent-gateway/dist/index.js --jsonl --isolate-tab
+```
+
+The JSONL gateway processes up to 8 requests concurrently (correlate responses by `id`). Set `RELAY_JSONL_CONCURRENCY=1` for strictly sequential handling.
+
+**CLI pipelines:** open a background tab once, then pin the pipeline to it:
+
+```bash
+browser-relay nav https://example.com --new-tab --background --json
+```
+
+```bash
+export RELAY_RUN_ID=pipeline_checkout RELAY_TAB_ID=<tab_id from the JSON above>
+```
+
+| Variable | Effect |
+| --- | --- |
+| `RELAY_ISOLATE_TAB=1` | Client/gateway opens and pins its own background tab |
+| `RELAY_ISOLATED_TAB_URL` | Start URL for that tab (default `about:blank`) |
+| `RELAY_RUN_ID` | Stable run/session ID for a pipeline |
+| `RELAY_TAB_ID` | Default tab for every CLI command |
+| `RELAY_BACKGROUND=1` | CLI opens/navigates tabs without stealing focus (same as `--background`) |
+| `RELAY_JSONL_CONCURRENCY` | Max in-flight JSONL requests per gateway (default 8) |
+
+---
+
 ## 🛠️ 19 Browser Tools
 
 Every tool operates with semantic locators (accessible role, name, label, text) before falling back to re-validated viewport coordinates:

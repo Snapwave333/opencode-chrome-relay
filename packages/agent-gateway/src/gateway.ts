@@ -19,6 +19,9 @@ export interface RelayClientLike {
   sendControl(command: ControlCommand["command"], instruction?: string): Promise<any>;
   getRunId(): string;
   getEpoch(): number;
+  getTabId?(): number | null;
+  isTabIsolated?(): boolean;
+  releaseDedicatedTab?(): Promise<void>;
 }
 
 export interface PipelineStep {
@@ -121,6 +124,8 @@ export class AgentGateway {
         connected: true,
         run_id: this.client.getRunId(),
         epoch: this.client.getEpoch(),
+        tab_id: this.client.getTabId?.() ?? null,
+        isolated_tab: this.client.isTabIsolated?.() ?? false,
         tool_count: this.listTools().length,
       };
     }
@@ -149,6 +154,13 @@ export class AgentGateway {
     this.client.disconnect();
     this.connected = false;
     this.connectionAttempt = null;
+  }
+
+  public async shutdown(): Promise<void> {
+    if (this.connected) {
+      await this.client.releaseDedicatedTab?.().catch(() => undefined);
+    }
+    this.disconnect();
   }
 
   private async ensureConnected(): Promise<void> {

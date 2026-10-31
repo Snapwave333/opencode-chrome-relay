@@ -1,9 +1,10 @@
 use crate::protocol::{ControlCommand, ProtocolEnvelope};
+use crate::router::{ConnectionId, ResultRouter};
 use crate::scheduler::Scheduler;
 use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::accept_async;
 
 pub struct BrokerServer {
@@ -11,21 +12,29 @@ pub struct BrokerServer {
     auth_token: String,
     scheduler: Scheduler,
     event_sender: broadcast::Sender<String>,
+    router: ResultRouter,
 }
+
+const EVENT_CHANNEL_CAPACITY: usize = 1024;
 
 impl BrokerServer {
     pub fn new(addr: SocketAddr, auth_token: String, scheduler: Scheduler) -> Self {
-        let (tx, _rx) = broadcast::channel(100);
+        let (tx, _rx) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         BrokerServer {
             addr,
             auth_token,
             scheduler,
             event_sender: tx,
+            router: ResultRouter::new(),
         }
     }
 
     pub fn get_event_sender(&self) -> broadcast::Sender<String> {
         self.event_sender.clone()
+    }
+
+    pub fn router(&self) -> ResultRouter {
+        self.router.clone()
     }
 
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
@@ -38,33 +47,50 @@ impl BrokerServer {
             let auth_token = self.auth_token.clone();
             let event_tx = self.event_sender.clone();
             let mut event_rx = event_tx.subscribe();
+            let router = self.router.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = handle_connection(
-                    stream,
-                    peer_addr,
+                let (conn_id, mut direct_rx) = router.register();
+                let ctx = ConnectionContext {
                     auth_token,
                     scheduler,
                     event_tx,
-                    &mut event_rx,
-                )
-                .await
+                    router: router.clone(),
+                    conn_id,
+                };
+                if let Err(e) =
+                    handle_connection(stream, peer_addr, ctx, &mut event_rx, &mut direct_rx).await
                 {
                     eprintln!("Connection error from {}: {}", peer_addr, e);
                 }
+                router.unregister(conn_id);
             });
         }
     }
 }
 
-async fn handle_connection(
-    stream: TcpStream,
-    _peer_addr: SocketAddr,
+struct ConnectionContext {
     auth_token: String,
     scheduler: Scheduler,
     event_tx: broadcast::Sender<String>,
+    router: ResultRouter,
+    conn_id: ConnectionId,
+}
+
+async fn handle_connection(
+    stream: TcpStream,
+    _peer_addr: SocketAddr,
+    ctx: ConnectionContext,
     event_rx: &mut broadcast::Receiver<String>,
+    direct_rx: &mut mpsc::UnboundedReceiver<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let ConnectionContext {
+        auth_token,
+        scheduler,
+        event_tx,
+        router,
+        conn_id,
+    } = ctx;
     let ws_stream = accept_async(stream).await?;
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
 
@@ -129,6 +155,9 @@ async fn handle_connection(
                                 }
                             } else if let Ok(envelope) = serde_json::from_value::<ProtocolEnvelope>(parsed.clone()) {
                                 if envelope.event == "browser.action.request" {
+                                    if let Some(idem) = envelope.idempotency_key.as_deref() {
+                                        router.track(idem, conn_id);
+                                    }
                                     match scheduler.submit_action(&envelope) {
                                         Ok(policy) => {
                                             let resp = serde_json::json!({
@@ -167,6 +196,17 @@ async fn handle_connection(
                                         }
                                     }
                                 } else if envelope.event == "action.started" {
+                                    let from_extension = envelope
+                                        .payload
+                                        .as_ref()
+                                        .and_then(|p| p.get("from_extension"))
+                                        .and_then(|v| v.as_bool())
+                                        .unwrap_or(false);
+                                    if !from_extension {
+                                        if let Some(idem) = envelope.idempotency_key.as_deref() {
+                                            router.track(idem, conn_id);
+                                        }
+                                    }
                                     let _ = scheduler.submit_action(&envelope);
                                     let _ = event_tx.send(text.to_string());
                                 } else if envelope.event == "action.finished" || envelope.event == "action.failed" {
@@ -179,7 +219,14 @@ async fn handle_connection(
                                             .unwrap_or_else(|| "{}".to_string());
                                         let _ = scheduler.complete_action(idem, is_ok, is_ok, &outcome_str);
                                     }
-                                    let _ = event_tx.send(text.to_string());
+                                    let routed = envelope
+                                        .idempotency_key
+                                        .as_deref()
+                                        .map(|idem| router.deliver_result(idem, text))
+                                        .unwrap_or(false);
+                                    if !routed {
+                                        let _ = event_tx.send(text.to_string());
+                                    }
                                 } else if envelope.event == "session.create" {
                                     let run_id = envelope.run_id.unwrap_or_else(|| format!("run_{}", uuid::Uuid::new_v4()));
                                     let name = envelope.payload.as_ref().and_then(|p| p.get("name")).and_then(|n| n.as_str());
@@ -270,6 +317,11 @@ async fn handle_connection(
                     }
                     Some(Err(e)) => return Err(Box::new(e)),
                     None => break,
+                }
+            }
+            direct = direct_rx.recv() => {
+                if let Some(frame) = direct {
+                    ws_sender.send(tokio_tungstenite::tungstenite::Message::Text(frame)).await?;
                 }
             }
             ev = event_rx.recv() => {

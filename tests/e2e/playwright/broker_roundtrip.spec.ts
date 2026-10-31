@@ -167,3 +167,90 @@ test.describe("Broker ↔ side panel relay", () => {
     }
   });
 });
+
+test.describe("Concurrent agents", () => {
+  async function openSecondTarget(relayTarget: { page: { context: () => any }; url: string; run: any }) {
+    const page = await relayTarget.page.context().newPage();
+    const url = `${relayTarget.url}&agent=b`;
+    await page.goto(url);
+    const listing = await relayTarget.run({ type: "browser_list_tabs" });
+    const tab = listing.payload.tabs.find((t: { url: string }) => t.url === url);
+    return { page, tabId: tab.id as number };
+  }
+
+  test("runs actions on different tabs in parallel but keeps each tab strictly ordered", async ({ relayTarget }) => {
+    const second = await openSecondTarget(relayTarget);
+    try {
+      const finished: string[] = [];
+      const track = (label: string, p: Promise<any>) => p.then((r) => (finished.push(label), r));
+
+      const slowA = track("wait:A", relayTarget.run({ type: "browser_wait", timeout_ms: 1200 }));
+      await new Promise((r) => setTimeout(r, 100));
+      const clickA = track(
+        "click:A",
+        relayTarget.run({ type: "browser_click", locator: { selector: "#target-button" } })
+      );
+      const clickB = track(
+        "click:B",
+        relayTarget.run({ type: "browser_click", locator: { selector: "#target-button" } }, { tabId: second.tabId })
+      );
+
+      const replies = await Promise.all([slowA, clickA, clickB]);
+      expect(replies.map((r) => r.event)).toEqual(["action.finished", "action.finished", "action.finished"]);
+      expect(finished).toEqual(["click:B", "wait:A", "click:A"]);
+      await expect(relayTarget.page.locator("#click-count")).toHaveText("1");
+      await expect(second.page.locator("#click-count")).toHaveText("1");
+    } finally {
+      await second.page.close();
+    }
+  });
+
+  test("interleaved bursts from two agents land on their own tabs", async ({ relayTarget }) => {
+    const second = await openSecondTarget(relayTarget);
+    try {
+      const burst = (tabId: number, n: number) =>
+        Array.from({ length: n }, () =>
+          relayTarget.run({ type: "browser_click", locator: { selector: "#target-button" } }, { tabId })
+        );
+      const replies = await Promise.all([
+        ...burst(relayTarget.tabId, 5),
+        ...burst(second.tabId, 3),
+      ]);
+      expect(replies.every((r) => r.event === "action.finished")).toBe(true);
+      await expect(relayTarget.page.locator("#click-count")).toHaveText("5");
+      await expect(second.page.locator("#click-count")).toHaveText("3");
+    } finally {
+      await second.page.close();
+    }
+  });
+
+  test("background tabs open and navigate without stealing focus from the user", async ({
+    relayTarget,
+    serviceWorker,
+  }) => {
+    const focusedTab = () =>
+      serviceWorker.evaluate(async () => {
+        const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+        return tab?.id ?? null;
+      });
+    await relayTarget.page.bringToFront();
+    const before = await focusedTab();
+    expect(before).toBe(relayTarget.tabId);
+
+    const opened = await relayTarget.run({ type: "browser_new_tab", url: "about:blank", background: true });
+    expect(opened.event).toBe("action.finished");
+    const agentTab = opened.payload.tab_id as number;
+    expect(agentTab).not.toBe(relayTarget.tabId);
+    expect(await focusedTab()).toBe(before);
+
+    const target = new URL("/second_page.html", relayTarget.url).toString();
+    const nav = await relayTarget.run({ type: "browser_navigate", url: target, background: true }, { tabId: agentTab });
+    expect(nav.payload).toMatchObject({ success: true, tab_id: agentTab, url: target });
+    expect(await focusedTab()).toBe(before);
+
+    const text = await relayTarget.run({ type: "browser_eval", text: "document.title" }, { tabId: agentTab });
+    expect(text.payload.eval_result).toBe("OpenCode Relay Second Page");
+
+    await relayTarget.run({ type: "browser_close_tab" }, { tabId: agentTab });
+  });
+});

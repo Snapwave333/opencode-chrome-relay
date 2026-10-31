@@ -1,4 +1,5 @@
 import WebSocket from "ws";
+import { randomUUID } from "crypto";
 import {
   ProtocolEnvelope,
   ActionPayload,
@@ -9,6 +10,19 @@ export interface RelayClientOptions {
   brokerUrl?: string;
   authToken?: string;
   runId?: string;
+  isolateTab?: boolean;
+  isolatedTabUrl?: string;
+}
+
+const TAB_AGNOSTIC_ACTIONS = new Set<ActionPayload["type"]>([
+  "browser_list_tabs",
+  "browser_new_tab",
+  "browser_status",
+  "browser_switch_tab",
+]);
+
+function envFlag(value: string | undefined): boolean {
+  return /^(1|true|yes|on)$/i.test((value || "").trim());
 }
 
 export class RelayBrokerClient {
@@ -21,11 +35,18 @@ export class RelayBrokerClient {
   private tabId: number | null = null;
   private leaseId: string | null = null;
   private eventHandlers: Map<string, ((payload: any) => void)[]> = new Map();
+  private readonly instanceId = randomUUID().slice(0, 8);
+  private readonly isolateTab: boolean;
+  private readonly isolatedTabUrl: string;
+  private dedicatedTabId: number | null = null;
+  private dedicatedTabRequest: Promise<number> | null = null;
 
   constructor(options: RelayClientOptions = {}) {
     this.brokerUrl = options.brokerUrl || process.env.RELAY_BROKER_URL || "ws://127.0.0.1:4098";
     this.authToken = options.authToken || process.env.RELAY_AUTH_TOKEN || "";
-    this.runId = options.runId || `run_${Date.now()}`;
+    this.runId = options.runId || process.env.RELAY_RUN_ID || `run_${randomUUID()}`;
+    this.isolateTab = options.isolateTab ?? envFlag(process.env.RELAY_ISOLATE_TAB);
+    this.isolatedTabUrl = options.isolatedTabUrl || process.env.RELAY_ISOLATED_TAB_URL || "about:blank";
   }
 
   public async connect(): Promise<void> {
@@ -105,9 +126,54 @@ export class RelayBrokerClient {
   }
 
   public async sendAction(action: ActionPayload, tabId?: number): Promise<any> {
-    const targetTabId = tabId ?? this.tabId;
+    let targetTabId = tabId ?? this.tabId;
+    if (this.isolateTab && targetTabId == null && !TAB_AGNOSTIC_ACTIONS.has(action.type)) {
+      targetTabId = await this.ensureDedicatedTab();
+    }
+    if (this.isolateTab && (action.type === "browser_navigate" || action.type === "browser_new_tab")) {
+      action = { ...action, background: action.background ?? true };
+    }
+    return this.dispatch(action, targetTabId ?? undefined);
+  }
+
+  public async ensureDedicatedTab(): Promise<number> {
+    if (this.dedicatedTabId != null) return this.dedicatedTabId;
+    if (!this.dedicatedTabRequest) {
+      this.dedicatedTabRequest = this.dispatch({
+        type: "browser_new_tab",
+        url: this.isolatedTabUrl,
+        background: true,
+      } as ActionPayload)
+        .then((outcome) => {
+          const created = Number(outcome?.tab_id);
+          if (!Number.isInteger(created) || created <= 0) {
+            throw new Error("Relay did not return a tab id for the dedicated agent tab");
+          }
+          this.dedicatedTabId = created;
+          this.setTabBinding(created, `lease_${this.runId}_${created}`);
+          return created;
+        })
+        .finally(() => {
+          this.dedicatedTabRequest = null;
+        });
+    }
+    return this.dedicatedTabRequest;
+  }
+
+  public async releaseDedicatedTab(): Promise<void> {
+    const tabId = this.dedicatedTabId;
+    if (tabId == null) return;
+    this.dedicatedTabId = null;
+    if (this.tabId === tabId) {
+      this.tabId = null;
+      this.leaseId = null;
+    }
+    await this.dispatch({ type: "browser_close_tab" } as ActionPayload, tabId).catch(() => undefined);
+  }
+
+  private async dispatch(action: ActionPayload, targetTabId?: number): Promise<any> {
     this.sequence += 1;
-    const idempotencyKey = `${this.runId}:${this.epoch}:${this.sequence}`;
+    const idempotencyKey = `${this.runId}:${this.instanceId}:${this.epoch}:${this.sequence}`;
 
     const envelope: ProtocolEnvelope = {
       v: 1,
@@ -117,7 +183,10 @@ export class RelayBrokerClient {
       epoch: this.epoch,
       sequence: this.sequence,
       tab_id: targetTabId ?? undefined,
-      lease_id: this.leaseId ?? `lease_${this.runId}`,
+      lease_id:
+        targetTabId != null && targetTabId === this.tabId && this.leaseId
+          ? this.leaseId
+          : `lease_${this.runId}_${targetTabId ?? "none"}`,
       idempotency_key: idempotencyKey,
       timestamp: new Date().toISOString(),
       action,
@@ -217,5 +286,13 @@ export class RelayBrokerClient {
 
   public getEpoch(): number {
     return this.epoch;
+  }
+
+  public getTabId(): number | null {
+    return this.tabId;
+  }
+
+  public isTabIsolated(): boolean {
+    return this.isolateTab;
   }
 }

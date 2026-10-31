@@ -26,8 +26,20 @@ export interface CliOptions {
   timeoutMs: number;
   json: boolean;
   newTab: boolean;
+  background: boolean;
   follow: boolean;
   verbose: boolean;
+}
+
+function parseEnvTabId(value: string | undefined): number | undefined {
+  const parsed = Number.parseInt(value || "", 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+export function applyBackgroundPreference(action: ActionPayload, options: Pick<CliOptions, "background">): ActionPayload {
+  if (!options.background) return action;
+  if (action.type !== "browser_navigate" && action.type !== "browser_new_tab") return action;
+  return { ...action, background: action.background ?? true };
 }
 
 export function parseCliArgs(argv: string[]): {
@@ -37,10 +49,12 @@ export function parseCliArgs(argv: string[]): {
 } {
   const options: CliOptions = {
     brokerUrl: DEFAULT_BROKER_URL,
-    runId: "run_1",
+    runId: process.env.RELAY_RUN_ID || "run_1",
+    tabId: parseEnvTabId(process.env.RELAY_TAB_ID),
     timeoutMs: 18000,
     json: false,
     newTab: false,
+    background: /^(1|true|yes|on)$/i.test(process.env.RELAY_BACKGROUND || ""),
     follow: false,
     verbose: false,
   };
@@ -52,6 +66,8 @@ export function parseCliArgs(argv: string[]): {
       options.json = true;
     } else if (arg === "--new-tab" || arg === "-n") {
       options.newTab = true;
+    } else if (arg === "--background" || arg === "-b") {
+      options.background = true;
     } else if (arg === "--follow" || arg === "-f") {
       options.follow = true;
     } else if (arg === "--verbose" || arg === "-v") {
@@ -194,6 +210,7 @@ export async function executeRelayAction(
   const ws = existingWs || (await ensureBrokerConnected(options.brokerUrl));
   const shouldClose = !existingWs;
   const idempotencyKey = `cli_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  action = applyBackgroundPreference(action, options);
 
   const envelope = {
     v: 1,
@@ -491,9 +508,10 @@ AUTONOMOUS MULTI-STEP AGENT & TELEMETRY COMMANDS:
   reload-ext                     Remotely hot-reload the Chrome extension service worker
 
 GLOBAL OPTIONS:
-  --tab, -t <tabId>              Target a specific Chrome tab ID (default: active tab)
+  --tab, -t <tabId>              Target a specific Chrome tab ID (default: $RELAY_TAB_ID, else active tab)
   --new-tab, -n                  Open navigation target in a new Chrome tab
-  --run, -r <runId>              Session run ID (default: run_1)
+  --background, -b               Open/navigate tabs without stealing focus (default: $RELAY_BACKGROUND)
+  --run, -r <runId>              Session run ID (default: $RELAY_RUN_ID, else run_1)
   --timeout, -T <ms>             Action timeout in milliseconds (default: 18000)
   --json, -j                     Output structured JSON for programmatic AI agent consumption
   --verbose, -v                  Verbose logging mode

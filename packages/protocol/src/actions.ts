@@ -59,6 +59,7 @@ export const ActionPayloadSchema = z.object({
   timeout_ms: z.number().int().positive().optional(),
   scroll_direction: z.enum(["up", "down", "left", "right"]).optional(),
   scroll_amount: z.number().optional(),
+  background: z.boolean().optional(),
   risk: RiskLevelSchema.default("read_only"),
   is_irreversible: z.boolean().default(false),
 });
