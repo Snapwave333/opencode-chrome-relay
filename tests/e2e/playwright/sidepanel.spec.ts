@@ -1,5 +1,6 @@
 import { test, expect } from "./support/fixtures";
 import { SIDEPANEL_HTML } from "./support/paths";
+import { axeViolations } from "./support/a11y";
 
 test.beforeEach(async ({ page, relay, pageErrors }) => {
   expect(pageErrors).toEqual([]);
@@ -24,6 +25,20 @@ test.describe("Sidepanel cockpit with a connected bridge", () => {
     await expect(page.locator("#bridge-status-badge")).toHaveClass(/connected/);
     await expect(page.locator("#model-name")).toContainText("NVIDIA NIM");
     expect(await relay.sentOfType("GET_BRIDGE_STATUS")).toHaveLength(1);
+  });
+
+  test("has no WCAG 2.1 AA violations beyond tracked issues", async ({ page }) => {
+    test.info().annotations.push({
+      type: "known-issue",
+      description: "nested-interactive: .session-tab is a tab that contains a close button",
+    });
+    expect(await axeViolations(page, { knownIssues: ["nested-interactive"] })).toEqual([]);
+  });
+
+  test("has no WCAG 2.1 AA violations with the delete dialog open", async ({ page }) => {
+    await page.click("#btn-delete-session");
+    await expect(page.locator("#delete-dialog")).toBeVisible();
+    expect(await axeViolations(page, { include: "#delete-dialog" })).toEqual([]);
   });
 
   test("renders Material 3 vector icons on control buttons and status tags", async ({ page }) => {

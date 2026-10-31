@@ -6,7 +6,10 @@ import path from "path";
 import type { AddressInfo } from "net";
 import { RelayHarness, type ChromeMockConfig } from "./chrome-mock";
 import { ClosedShadowInspector } from "./closed-shadow";
-import { EXTENSION_DIR, FIXTURES_DIR } from "./paths";
+import { FakeBroker, type Envelope } from "./fake-broker";
+import { BROKER_PORT, EXTENSION_DIR, FIXTURES_DIR } from "./paths";
+import type { WebSocket } from "ws";
+import { randomUUID } from "crypto";
 
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -44,12 +47,23 @@ type UiFixtures = {
   pageErrors: string[];
 };
 
+export interface RelayTarget {
+  page: Page;
+  url: string;
+  tabId: number;
+  socket: WebSocket;
+  broker: FakeBroker;
+  run: (action: Envelope, options?: { idempotencyKey?: string; tabId?: number }) => Promise<Envelope>;
+}
+
 type ExtensionTestFixtures = {
   extPage: Page;
   shadow: ClosedShadowInspector;
+  relayTarget: RelayTarget;
 };
 
 type WorkerFixtures = {
+  broker: FakeBroker | null;
   fixtureServerUrl: string;
   extensionContext: BrowserContext;
   serviceWorker: Worker;
@@ -80,6 +94,31 @@ export const test = base.extend<UiFixtures & ExtensionTestFixtures, WorkerFixtur
     },
     { scope: "worker" },
   ],
+
+  broker: [
+    async ({}, use) => {
+      const broker = await FakeBroker.start(BROKER_PORT);
+      await use(broker);
+      await broker?.close();
+    },
+    { scope: "worker" },
+  ],
+
+  relayTarget: async ({ broker, extPage, fixtureServerUrl }, use) => {
+    test.skip(!broker, `port ${BROKER_PORT} is busy (is a real relay broker running?)`);
+    const url = `${fixtureServerUrl}/test_page.html?client=${randomUUID()}`;
+    await extPage.goto(url);
+    const { socket, tabId } = await broker!.findClientByTabUrl(url);
+    await use({
+      page: extPage,
+      url,
+      tabId,
+      socket,
+      broker: broker!,
+      run: (action, options = {}) =>
+        broker!.dispatch(socket, action, { tabId: options.tabId ?? tabId, idempotencyKey: options.idempotencyKey }),
+    });
+  },
 
   extensionContext: [
     async ({ channel, headless }, use) => {

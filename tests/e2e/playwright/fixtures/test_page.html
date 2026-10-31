@@ -16,12 +16,21 @@
     <button id="target-button" aria-label="Confirm Purchase">Confirm Purchase</button>
     <output id="click-count" aria-label="Click count">0</output>
     <input id="target-input" type="text" placeholder="Enter username..." aria-label="Username field" />
+    <select id="plan-select" aria-label="Plan">
+      <option value="free">Free</option>
+      <option value="pro">Pro</option>
+      <option value="team">Team</option>
+    </select>
+    <output id="plan-choice" aria-label="Selected plan">free</output>
     <div style="height: 1200px; background: #eee; padding: 20px;">Scrollable content area</div>
   </div>
   <script>
     document.getElementById("target-button").addEventListener("click", () => {
       const counter = document.getElementById("click-count");
       counter.textContent = String(Number(counter.textContent) + 1);
+    });
+    document.getElementById("plan-select").addEventListener("change", (event) => {
+      document.getElementById("plan-choice").textContent = event.target.value;
     });
   </script>
 </body>

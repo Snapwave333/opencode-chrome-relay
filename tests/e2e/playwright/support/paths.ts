@@ -1,4 +1,5 @@
 import path from "path";
+import { DEFAULT_BROKER_URL } from "../../../../apps/chrome-extension/src/shared/constants";
 
 export const REPO_ROOT = path.resolve(__dirname, "../../../..");
 export const EXTENSION_DIR = path.join(REPO_ROOT, "apps/chrome-extension");
@@ -19,3 +20,6 @@ export const BUILD_INPUTS = [
   path.join(EXTENSION_DIR, "build.mjs"),
   path.join(REPO_ROOT, "packages/protocol/src"),
 ];
+
+export const BROKER_PORT = Number(new URL(DEFAULT_BROKER_URL).port);
+export const SECOND_PAGE = path.join(FIXTURES_DIR, "second_page.html");

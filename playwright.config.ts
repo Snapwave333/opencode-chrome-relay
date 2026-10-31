@@ -32,5 +32,10 @@ export default defineConfig({
       name: "extension-runtime",
       testMatch: /extension_browser\.spec\.ts$/,
     },
+    {
+      name: "broker-roundtrip",
+      testMatch: /broker_roundtrip\.spec\.ts$/,
+      dependencies: ["extension-runtime"],
+    },
   ],
 });

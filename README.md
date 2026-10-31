@@ -285,16 +285,20 @@ npm run test:e2e
 
 ### 🎭 Playwright E2E Suite
 
+Side panel and dock are also scanned with axe-core against WCAG 2.1 AA. CI runs everything via `.github/workflows/e2e.yml`.
+
 The extension is rebuilt automatically before a run whenever `apps/chrome-extension/src` or `packages/protocol/src` is newer than `dist/`.
 
 | Project | Specs | What it exercises |
 | --- | --- | --- |
 | `ui-mocked` | `sidepanel.spec.ts`, `overlay_and_dock.spec.ts` | Side panel, overlay and dock against a recording `chrome.runtime` mock, with a virtual clock for timer-driven UI |
 | `extension-runtime` | `extension_browser.spec.ts` | The unpacked extension in real Chrome: service worker, content-script injection, worker → tab messaging, closed shadow DOM via CDP, packaged side panel |
+| `broker-roundtrip` | `broker_roundtrip.spec.ts` | A fake WebSocket broker on the real broker port drives `action.started` envelopes through the service worker into a live tab and asserts the `action.finished` / `action.failed` replies, idempotency, and side panel relay. Runs after `extension-runtime`; skipped if the port is taken by a real broker |
 
 ```bash
 npm run test:e2e:ui
 npm run test:e2e:extension
+npm run test:e2e:broker
 npm run test:e2e:report
 ```
 
@@ -303,6 +307,7 @@ npm run test:e2e:report
 | `PW_CHANNEL` | Browser channel (default `chrome`). Use `chromium` where branded Chrome ignores `--load-extension` |
 | `E2E_FORCE_BUILD=1` | Always rebuild before running |
 | `E2E_SKIP_BUILD=1` | Never rebuild |
+| `--no-deps` | Run `broker-roundtrip` without first running `extension-runtime` |
 | `CI=1` | Retries, `forbidOnly`, GitHub annotations and an HTML report |
 
 ---

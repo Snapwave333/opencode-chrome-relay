@@ -1,5 +1,6 @@
 import type { Locator, Page } from "@playwright/test";
 import { test, expect } from "./support/fixtures";
+import { axeViolations } from "./support/a11y";
 import { CONTENT_SCRIPT, DOCK_HOST_ID, OVERLAY_HOST_ID, TEST_PAGE } from "./support/paths";
 
 test.use({ chromeMock: { openShadowRoots: true } });
@@ -257,6 +258,12 @@ test.describe("In-page execution dock", () => {
       await expect.poll(() => relay.lastSent()).toEqual({ type: "DISPATCH_CONTROL", command });
     });
   }
+
+  test("dock toolbar has no WCAG 2.1 AA violations", async ({ page, relay }) => {
+    await relay.emit({ type: "SHOW_IN_PAGE_DOCK" });
+    await expect(page.getByRole("toolbar")).toBeVisible();
+    expect(await axeViolations(page, { include: `#${DOCK_HOST_ID}` })).toEqual([]);
+  });
 
   test("dismiss removes the dock and it can be summoned again", async ({ page, relay }) => {
     await relay.emit({ type: "SHOW_IN_PAGE_DOCK" });
