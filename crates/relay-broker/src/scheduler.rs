@@ -227,10 +227,21 @@ impl Scheduler {
         let mode = lock_or_recover(&self.auth_mode)?.clone();
         let allowed = lock_or_recover(&self.allowed_origins)?.clone();
         let origin = action.expected_origin.as_deref().unwrap_or("");
-        let pol = evaluate_action(&mode, action, origin, &allowed);
+        let mut pol = evaluate_action(&mode, action, origin, &allowed);
+
+        // The caller approved this one action up front (CLI --yes). Forbidden targets stay forbidden.
+        let pre_approved = envelope
+            .payload
+            .as_ref()
+            .and_then(|p| p.get("approved"))
+            .and_then(|b| b.as_bool())
+            .unwrap_or(false);
+        if pre_approved && !pol.is_forbidden {
+            pol.requires_approval = false;
+        }
 
         if pol.is_forbidden {
-            return Ok(pol);
+            return Err(pol.reason.unwrap_or_else(|| "Action is forbidden by policy".into()));
         }
 
         // Record action in journal
@@ -275,7 +286,10 @@ impl Scheduler {
             if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(outcome_json) {
                 // Delete screenshot from disk if temporary file path was passed
                 if let Some(path) = val.get("screenshot_path").and_then(|p| p.as_str()) {
-                    let _ = std::fs::remove_file(path);
+                    // The path comes from a client, so only a temp-dir screenshot may be deleted
+                    if is_temp_screenshot(std::path::Path::new(path)) {
+                        let _ = std::fs::remove_file(path);
+                    }
                 }
                 // Purge large screenshot base64 bytes from SQLite journal
                 if val.get("screenshot_base64").is_some() {
@@ -291,4 +305,14 @@ impl Scheduler {
             .record_action_result(idempotency_key, success, verified, &sanitized_outcome)
             .map_err(|e| e.to_string())
     }
+}
+
+fn is_temp_screenshot(path: &std::path::Path) -> bool {
+    let (Ok(file), Ok(temp)) = (path.canonicalize(), std::env::temp_dir().canonicalize()) else {
+        return false;
+    };
+    file.parent() == Some(temp.as_path())
+        && file
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("png") || ext.eq_ignore_ascii_case("jpg"))
 }

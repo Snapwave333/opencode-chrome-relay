@@ -1,5 +1,7 @@
 import { NATIVE_HOST_NAME, DEFAULT_BROKER_URL } from "../shared/constants.js";
 
+const AUTH_TIMEOUT_MS = 8000;
+
 export class NativeBridgePort {
   private ws: WebSocket | null = null;
   private port: chrome.runtime.Port | null = null;
@@ -60,7 +62,10 @@ export class NativeBridgePort {
         if (this.authToken) {
           ws.send(JSON.stringify({ auth_token: this.authToken }));
         }
-        
+        // An open socket that never authenticates would otherwise count as connected forever
+        setTimeout(() => {
+          if (this.ws === ws && !this.authenticated) ws.close();
+        }, AUTH_TIMEOUT_MS);
       };
       ws.onmessage = (ev) => {
         try {
@@ -74,7 +79,10 @@ export class NativeBridgePort {
             }
           }
           if (parsed?.error === "Unauthorized") {
+            // The broker's token changed; ask the native host again instead of retrying this one
             this.authenticated = false;
+            this.authToken = null;
+            chrome.storage.local.remove("relay_auth_token").catch(() => {});
             ws.close();
           }
           for (const listener of this.messageListeners) {

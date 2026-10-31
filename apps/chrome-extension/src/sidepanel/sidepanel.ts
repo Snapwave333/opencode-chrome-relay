@@ -456,7 +456,8 @@ function buildConfirmRow(session: SessionData, msg: ChatMessage): HTMLElement {
   const yes = document.createElement("button");
   yes.type = "button";
   yes.className = `confirm-btn primary${op === "uninstall" ? " danger" : ""}`;
-  yes.innerHTML = `${getMaterial3Svg(op === "uninstall" ? "cancel" : op === "disable" ? "pause_circle" : "check_circle", 14)} <span>${verb} ${name}</span>`;
+  yes.innerHTML = `${getMaterial3Svg(op === "uninstall" ? "cancel" : op === "disable" ? "pause_circle" : "check_circle", 14)} <span></span>`;
+  yes.querySelector("span")!.textContent = `${verb} ${name}`;
   yes.onclick = async () => {
     yes.disabled = no.disabled = true;
     try {
@@ -892,7 +893,9 @@ function dispatchControl(command: string, instruction?: string): void {
 }
 
 // Listen for broadcast events from background
-chrome.runtime.onMessage.addListener((msg) => {
+chrome.runtime.onMessage.addListener((msg, sender) => {
+  // Content scripts on every page can message the extension too; only the background drives the panel
+  if (sender.id !== chrome.runtime.id || sender.tab) return;
   const targetRunId = msg.run_id || activeRunId;
   const session = sessions.get(targetRunId);
   if (!session) return;

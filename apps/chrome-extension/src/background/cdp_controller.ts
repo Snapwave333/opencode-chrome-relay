@@ -7,11 +7,11 @@ export class CDPController {
     this.onDetachHandler = handler;
   }
 
-  public async sendCommand(tabId: number, method: string, params?: Record<string, any>): Promise<any> {
+  public async sendCommand(tabId: number, method: string, params?: Record<string, any>, timeoutMs = 5000): Promise<any> {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        reject(new Error(`CDP command ${method} timed out`));
-      }, 5000);
+        reject(new Error(`CDP command ${method} timed out after ${timeoutMs / 1000} s`));
+      }, timeoutMs);
       try {
         chrome.debugger.sendCommand({ tabId }, method, params || {}, (result) => {
           clearTimeout(timer);
@@ -90,6 +90,8 @@ export class CDPController {
       type: "keyUp",
       key: keyEvent.key,
       code: keyEvent.code,
+      windowsVirtualKeyCode: keyEvent.windowsVirtualKeyCode,
+      modifiers: keyEvent.modifiers,
     });
   }
 
@@ -156,10 +158,10 @@ export class CDPController {
       await this.sendCommand(tabId, "Page.enable");
     } catch {}
     try {
-      const result = await this.sendCommand(tabId, "Page.captureScreenshot", { format: "png", fromSurface: true });
+      const result = await this.sendCommand(tabId, "Page.captureScreenshot", { format: "png", fromSurface: true }, 7000);
       if (result?.data) return result.data;
     } catch {}
-    const fallback = await this.sendCommand(tabId, "Page.captureScreenshot", { format: "png" });
+    const fallback = await this.sendCommand(tabId, "Page.captureScreenshot", { format: "png" }, 7000);
     return fallback?.data || "";
   }
 
@@ -167,10 +169,13 @@ export class CDPController {
     try {
       await this.sendCommand(tabId, "Page.enable");
     } catch {}
-    const result = await this.sendCommand(tabId, "Page.printToPDF", options || {
-      printBackground: true,
-      preferCSSPageSize: true,
-    });
+    // Long pages take well over the default 5 s to print
+    const result = await this.sendCommand(
+      tabId,
+      "Page.printToPDF",
+      options || { printBackground: true, preferCSSPageSize: true },
+      60000
+    );
     return result?.data || "";
   }
 
@@ -185,30 +190,10 @@ export class CDPController {
         result.exceptionDetails.exception?.description ||
         result.exceptionDetails.text ||
         "CDP evaluation exception";
-      throw new Error(desc);
+      // The code ran and threw in the page; callers must not run it again another way
+      throw Object.assign(new Error(desc), { thrownByPage: true });
     }
     return result?.result?.value;
-  }
-
-  public async setDownloadBehavior(tabId: number, downloadPath?: string): Promise<void> {
-    try {
-      await this.sendCommand(tabId, "Browser.setDownloadBehavior", {
-        behavior: "allow",
-        downloadPath: downloadPath || "",
-        eventsEnabled: true,
-      });
-      return;
-    } catch {
-      // Browser domain may not be supported on page debuggee, fall back to Page domain
-    }
-    try {
-      await this.sendCommand(tabId, "Page.setDownloadBehavior", {
-        behavior: "allow",
-        downloadPath: downloadPath || "",
-      });
-    } catch {
-      // Ignore if Page domain is also unavailable
-    }
   }
 
   private waitForEvent(tabId: number, method: string, timeoutMs: number): Promise<any> {

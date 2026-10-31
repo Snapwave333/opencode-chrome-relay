@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { RelayBrokerClient } from "./client.js";
-import { ElementLocator, RiskLevel } from "@opencode/chrome-relay-protocol";
+import { ElementLocator, RiskLevel, NVIDIA_NIM_FREE_MODELS } from "@opencode/chrome-relay-protocol";
 import { SessionContextManager } from "./session.js";
 import { VisionTaskExecutor } from "./vision.js";
 
@@ -152,7 +152,7 @@ export const browserTools: Record<string, ToolDefinition> = {
         is_irreversible: false,
       });
 
-      const visionModel = sessionManager?.getVisionModel() || "gpt-4o";
+      const visionModel = sessionManager?.getVisionModel() || NVIDIA_NIM_FREE_MODELS.vision;
       const imageBase64 = res?.screenshot_base64;
 
       if (imageBase64) {
@@ -230,27 +230,12 @@ export const browserTools: Record<string, ToolDefinition> = {
       },
     },
     execute: async (args, client) => {
-      try {
-        return await client.sendAction({
-          type: "browser_click",
-          locator: args as ElementLocator,
-          risk: "external_effect",
-          is_irreversible: false,
-        });
-      } catch (err: any) {
-        const query = (args?.name || args?.selector || args?.text || "").toLowerCase();
-        if (/save|download/.test(query)) {
-          const { tryDismissNativeSaveDialog } = await import("./cli.js");
-          if (tryDismissNativeSaveDialog()) {
-            return {
-              success: true,
-              verified: true,
-              outcome_summary: "Confirmed native Save dialogue box via OS",
-            };
-          }
-        }
-        throw err;
-      }
+      return client.sendAction({
+        type: "browser_click",
+        locator: args as ElementLocator,
+        risk: "external_effect",
+        is_irreversible: false,
+      });
     },
   },
 
@@ -475,7 +460,8 @@ export const browserTools: Record<string, ToolDefinition> = {
         type: "browser_upload",
         file_paths: files,
         ...(args.selector || args.name ? { locator: { selector: args.selector, name: args.name } } : {}),
-        risk: "non_sensitive_mutation",
+        // Sending a local file to a website is an external effect, whoever asked for it
+        risk: "external_effect",
         is_irreversible: false,
       });
     },

@@ -72,7 +72,7 @@ export function getGatewayTools(): GatewayTool[] {
           steps: {
             type: "array",
             minItems: 1,
-            maxItems: 25,
+            maxItems: 1000,
             items: {
               type: "object",
               required: ["tool"],
@@ -170,8 +170,8 @@ export class AgentGateway {
     if (!Array.isArray(request.steps) || request.steps.length === 0) {
       throw new Error("Pipeline requires at least one step");
     }
-    if (request.steps.length > 25) {
-      throw new Error("Pipeline cannot exceed 25 steps");
+    if (request.steps.length > 1000) {
+      throw new Error("Pipeline cannot exceed 1000 steps");
     }
 
     const results: Array<Record<string, unknown>> = [];

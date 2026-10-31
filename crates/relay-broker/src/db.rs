@@ -1,5 +1,5 @@
 use crate::protocol::ExecutionState;
-use rusqlite::{params, Connection, OptionalExtension, Result};
+use rusqlite::{params, Connection, OptionalExtension, Result, TransactionBehavior};
 use std::sync::{Arc, Mutex};
 
 // Helper to recover from poisoned mutex by extracting the guard
@@ -31,6 +31,9 @@ impl Database {
 
     pub fn new(path: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
+        // Each action costs several writes; WAL with NORMAL sync avoids an fsync per statement
+        conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
         let db = Database {
             conn: Arc::new(Mutex::new(conn)),
         };
@@ -176,26 +179,26 @@ impl Database {
     }
 
     pub fn cleanup_unpinned_runs(&self) -> Result<usize> {
-        let conn = lock_or_recover(&self.conn)?;
-        
-        // BUG-015 fix: Use transaction for atomicity
-        conn.execute("BEGIN IMMEDIATE", [])?;
-        
+        let mut conn = lock_or_recover(&self.conn)?;
+
+        // BUG-015 fix: Use transaction for atomicity; dropping it on error rolls back
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
         // Get count first
-        let count: usize = conn.query_row(
+        let count: usize = tx.query_row(
             "SELECT COUNT(*) FROM runs WHERE is_pinned = 0",
             [],
             |row| row.get(0)
         )?;
         
         // Delete in correct order (foreign key constraints)
-        conn.execute("DELETE FROM action_journal WHERE run_id IN (SELECT run_id FROM runs WHERE is_pinned = 0)", [])?;
-        conn.execute("DELETE FROM checkpoints WHERE run_id IN (SELECT run_id FROM runs WHERE is_pinned = 0)", [])?;
-        conn.execute("DELETE FROM tab_leases WHERE owner_run_id IN (SELECT run_id FROM runs WHERE is_pinned = 0)", [])?;
-        conn.execute("DELETE FROM approvals WHERE run_id IN (SELECT run_id FROM runs WHERE is_pinned = 0)", [])?;
-        conn.execute("DELETE FROM runs WHERE is_pinned = 0", [])?;
-        
-        conn.execute("COMMIT", [])?;
+        tx.execute("DELETE FROM action_journal WHERE run_id IN (SELECT run_id FROM runs WHERE is_pinned = 0)", [])?;
+        tx.execute("DELETE FROM checkpoints WHERE run_id IN (SELECT run_id FROM runs WHERE is_pinned = 0)", [])?;
+        tx.execute("DELETE FROM tab_leases WHERE owner_run_id IN (SELECT run_id FROM runs WHERE is_pinned = 0)", [])?;
+        tx.execute("DELETE FROM approvals WHERE run_id IN (SELECT run_id FROM runs WHERE is_pinned = 0)", [])?;
+        tx.execute("DELETE FROM runs WHERE is_pinned = 0", [])?;
+
+        tx.commit()?;
         
         Ok(count)
     }
@@ -304,16 +307,17 @@ impl Database {
         // First clean up any expired leases (BUG-007 fix)
         let _ = self.cleanup_expired_leases();
         
-        let conn = lock_or_recover(&self.conn)?;
+        let mut conn = lock_or_recover(&self.conn)?;
         let now = chrono::Utc::now();
         let now_str = now.to_rfc3339();
         let expires_at = (now + chrono::Duration::seconds(duration_secs as i64)).to_rfc3339();
 
-        // Use atomic transaction with immediate mode to prevent TOCTOU race
-        conn.execute("BEGIN IMMEDIATE", [])?;
+        // Immediate mode prevents a TOCTOU race; dropping the transaction on error rolls it back,
+        // so a failed statement can't leave the shared connection stuck inside a transaction
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
         // Try to update existing lease if we own it or it's expired
-        let updated = conn.execute(
+        let updated = tx.execute(
             "UPDATE tab_leases 
              SET lease_id = ?1, owner_run_id = ?2, expires_at = ?3
              WHERE tab_id = ?4 AND (owner_run_id = ?2 OR expires_at < ?5)",
@@ -321,12 +325,12 @@ impl Database {
         )?;
 
         if updated > 0 {
-            conn.execute("COMMIT", [])?;
+            tx.commit()?;
             return Ok(true);
         }
 
         // Check if another run holds a valid lease
-        let conflict: Option<String> = conn
+        let conflict: Option<String> = tx
             .query_row(
                 "SELECT owner_run_id FROM tab_leases WHERE tab_id = ?1 AND expires_at >= ?2",
                 params![tab_id, now_str],
@@ -335,18 +339,17 @@ impl Database {
             .optional()?;
 
         if conflict.is_some() {
-            conn.execute("ROLLBACK", [])?;
             return Ok(false);
         }
 
         // No existing lease, insert new one
-        conn.execute(
+        tx.execute(
             "INSERT INTO tab_leases (lease_id, tab_id, owner_run_id, expires_at, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![lease_id, tab_id, run_id, expires_at, now_str],
         )?;
 
-        conn.execute("COMMIT", [])?;
+        tx.commit()?;
         Ok(true)
     }
 

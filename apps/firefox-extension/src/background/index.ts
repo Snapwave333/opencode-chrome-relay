@@ -131,22 +131,21 @@ if (typeof chrome !== "undefined" && chrome.debugger?.onEvent) {
   });
 }
 
-// Enable 1-click access to open side panel when extension toolbar icon is clicked
-if (chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
-  chrome.sidePanel
-    .setPanelBehavior({ openPanelOnActionClick: true })
-    .catch((err) => console.warn("Could not set openPanelOnActionClick:", err));
-}
-
-chrome.action.onClicked.addListener(async (tab) => {
-  if (chrome.sidePanel && tab.id) {
-    try {
-      await chrome.sidePanel.open({ tabId: tab.id });
-    } catch {
-      await chrome.sidePanel.open({ windowId: tab.windowId });
+// Firefox: open the sidebar when the toolbar button is clicked (chrome.sidePanel is Chrome-only)
+const fxGlobal = globalThis as any;
+const sidebarAction = fxGlobal.browser?.sidebarAction ?? (chrome as any).sidebarAction;
+const toolbarAction = fxGlobal.browser?.action ?? fxGlobal.browser?.browserAction ?? (chrome as any).action ?? (chrome as any).browserAction;
+if (toolbarAction?.onClicked?.addListener) {
+  toolbarAction.onClicked.addListener(async (tab: any) => {
+    if (sidebarAction && tab?.windowId) {
+      try {
+        await sidebarAction.open(tab.windowId);
+      } catch {
+        try { await sidebarAction.open(); } catch {}
+      }
     }
-  }
-});
+  });
+}
 
 const handledIdempotencyKeys = new Set<string>();
 

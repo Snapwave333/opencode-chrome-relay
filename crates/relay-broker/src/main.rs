@@ -79,8 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
     
-    println!("Broker will require authentication with token (first 8 chars): {}...", 
-             &token.chars().take(8).collect::<String>());
+    println!("Broker will require authentication (token length {})", token.len());
     
     let server = BrokerServer::new(addr, token, scheduler);
 

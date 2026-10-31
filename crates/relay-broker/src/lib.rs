@@ -23,6 +23,19 @@ mod tests {
         assert!(is_forbidden_url("chrome-extension://xyz/options.html"));
         assert!(is_forbidden_url("edge://version"));
         assert!(!is_forbidden_url("https://github.com"));
+        assert!(is_forbidden_url("  CHROME://settings"));
+        assert!(is_forbidden_url("javascript:alert(1)"));
+        assert!(is_forbidden_url("view-source:https://example.com"));
+    }
+
+    #[test]
+    fn test_sensitive_pattern_matches_word_starts() {
+        use policy::is_sensitive_pattern;
+        assert!(is_sensitive_pattern("Pay now"));
+        assert!(is_sensitive_pattern("Delete account"));
+        assert!(is_sensitive_pattern("submit_form"));
+        assert!(!is_sensitive_pattern("Display settings"));
+        assert!(!is_sensitive_pattern("border color"));
     }
 
     #[test]
@@ -187,6 +200,31 @@ mod tests {
         let pol = scheduler.submit_action(&envelope).unwrap();
         assert!(!pol.requires_approval);
         assert!(!pol.is_forbidden);
+
+        // A forbidden target is rejected outright, never admitted as a started action
+        let mut forbidden = envelope.clone();
+        forbidden.idempotency_key = Some("run_1:0:9".into());
+        forbidden.sequence = Some(9);
+        if let Some(a) = forbidden.action.as_mut() {
+            a.action_type = "browser_navigate".into();
+            a.url = Some("chrome://settings".into());
+        }
+        let err = scheduler.submit_action(&forbidden).unwrap_err();
+        assert!(err.contains("restricted"), "{}", err);
+
+        // A sensitive click needs approval unless the caller approved it up front
+        let mut sensitive = envelope.clone();
+        sensitive.idempotency_key = Some("run_1:0:10".into());
+        sensitive.sequence = Some(10);
+        if let Some(a) = sensitive.action.as_mut() {
+            a.action_type = "browser_click".into();
+            a.text = Some("Delete account".into());
+        }
+        assert!(scheduler.submit_action(&sensitive).unwrap().requires_approval);
+        sensitive.idempotency_key = Some("run_1:0:11".into());
+        sensitive.sequence = Some(11);
+        sensitive.payload = Some(serde_json::json!({ "approved": true }));
+        assert!(!scheduler.submit_action(&sensitive).unwrap().requires_approval);
 
         // Pause run
         let ctrl = ControlCommand {

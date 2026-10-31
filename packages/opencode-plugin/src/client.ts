@@ -8,6 +8,18 @@ import {
   ControlCommand,
 } from "@opencode/chrome-relay-protocol";
 
+export function loadAuthToken(): string {
+  if (process.env.RELAY_AUTH_TOKEN) {
+    return process.env.RELAY_AUTH_TOKEN;
+  }
+  const configDir =
+    process.platform === "win32"
+      ? path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "opencode-relay")
+      : path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "opencode-relay");
+  const tokenFile = path.join(configDir, "auth-token");
+  return existsSync(tokenFile) ? readFileSync(tokenFile, "utf-8").trim() : "";
+}
+
 export interface RelayClientOptions {
   brokerUrl?: string;
   authToken?: string;
@@ -27,35 +39,8 @@ export class RelayBrokerClient {
 
   constructor(options: RelayClientOptions = {}) {
     this.brokerUrl = options.brokerUrl || process.env.RELAY_BROKER_URL || "ws://127.0.0.1:4098";
-    this.authToken = options.authToken || this.loadAuthToken();
+    this.authToken = options.authToken || loadAuthToken();
     this.runId = options.runId || `run_${Date.now()}`;
-  }
-
-  private loadAuthToken(): string {
-    // Check environment variable first
-    if (process.env.RELAY_AUTH_TOKEN) {
-      return process.env.RELAY_AUTH_TOKEN;
-    }
-
-    // Try to read from config file
-    try {
-      let configDir: string;
-      if (process.platform === 'win32') {
-        configDir = path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'opencode-relay');
-      } else {
-        const xdgConfig = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
-        configDir = path.join(xdgConfig, 'opencode-relay');
-      }
-      
-      const tokenFile = path.join(configDir, 'auth-token');
-      if (existsSync(tokenFile)) {
-        return readFileSync(tokenFile, 'utf-8').trim();
-      }
-    } catch (err) {
-      // Silently fail - will try to connect without token
-    }
-
-    return "";
   }
 
   public async connect(): Promise<void> {
@@ -161,6 +146,7 @@ export class RelayBrokerClient {
 
       // The extension uses timeout_ms itself, so the broker reply needs a little longer
       const timeout = setTimeout(() => {
+        this.ws?.off("message", responseHandler);
         reject(new Error(`Action timeout waiting for broker response (${action.type})`));
       }, Math.max((action.timeout_ms || 30000) + 5000, 10000));
 
@@ -210,6 +196,7 @@ export class RelayBrokerClient {
       }
 
       const timeout = setTimeout(() => {
+        this.ws?.off("message", responseHandler);
         reject(new Error(`Control command timeout (${command})`));
       }, 5000);
 

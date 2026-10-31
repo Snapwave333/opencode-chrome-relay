@@ -51,7 +51,7 @@ describe("OpenCode Plugin Browser Tools", () => {
       type: "browser_upload",
       file_paths: [file],
       locator: { selector: "#file-input", name: undefined },
-      risk: "non_sensitive_mutation",
+      risk: "external_effect",
       is_irreversible: false,
     });
   });

@@ -186,6 +186,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if msg.is_text() {
                     if let Ok(text) = msg.to_text() {
                         let mut out = stdout();
+                        // A screenshot-sized broadcast would make Chrome drop the whole port
+                        if text.len() > framing::MAX_TO_CHROME_BYTES {
+                            let notice = serde_json::json!({
+                                "v": 1,
+                                "event": "relay.message_too_large",
+                                "payload": { "bytes": text.len() }
+                            });
+                            let _ = framing::write_native_message(&mut out, &notice.to_string());
+                            continue;
+                        }
                         if framing::write_native_message(&mut out, text).is_err() {
                             break;
                         }

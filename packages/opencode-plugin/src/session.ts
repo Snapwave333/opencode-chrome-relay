@@ -1,3 +1,4 @@
+import { NVIDIA_NIM_FREE_MODELS } from "@opencode/chrome-relay-protocol";
 export interface SessionBinding {
   serverId?: string;
   projectId?: string;
@@ -12,7 +13,8 @@ export interface SessionBinding {
 
 export class SessionContextManager {
   private activeBinding: SessionBinding | null = null;
-  private defaultVisionModel = "gpt-4o";
+  // Vision runs on NVIDIA NIM, which has no gpt-4o; asking for it 404s into a text-only fallback
+  private defaultVisionModel: string = NVIDIA_NIM_FREE_MODELS.vision;
 
   public bindSession(binding: SessionBinding): void {
     this.activeBinding = { ...binding };
