@@ -14,8 +14,15 @@
   <div class="container">
     <h2>OpenCode Relay Target Interactive Page</h2>
     <button id="target-button" aria-label="Confirm Purchase">Confirm Purchase</button>
+    <output id="click-count" aria-label="Click count">0</output>
     <input id="target-input" type="text" placeholder="Enter username..." aria-label="Username field" />
     <div style="height: 1200px; background: #eee; padding: 20px;">Scrollable content area</div>
   </div>
+  <script>
+    document.getElementById("target-button").addEventListener("click", () => {
+      const counter = document.getElementById("click-count");
+      counter.textContent = String(Number(counter.textContent) + 1);
+    });
+  </script>
 </body>
 </html>

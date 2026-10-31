@@ -283,6 +283,28 @@ cargo test --workspace
 npm run test:e2e
 ```
 
+### 🎭 Playwright E2E Suite
+
+The extension is rebuilt automatically before a run whenever `apps/chrome-extension/src` or `packages/protocol/src` is newer than `dist/`.
+
+| Project | Specs | What it exercises |
+| --- | --- | --- |
+| `ui-mocked` | `sidepanel.spec.ts`, `overlay_and_dock.spec.ts` | Side panel, overlay and dock against a recording `chrome.runtime` mock, with a virtual clock for timer-driven UI |
+| `extension-runtime` | `extension_browser.spec.ts` | The unpacked extension in real Chrome: service worker, content-script injection, worker → tab messaging, closed shadow DOM via CDP, packaged side panel |
+
+```bash
+npm run test:e2e:ui
+npm run test:e2e:extension
+npm run test:e2e:report
+```
+
+| Variable | Effect |
+| --- | --- |
+| `PW_CHANNEL` | Browser channel (default `chrome`). Use `chromium` where branded Chrome ignores `--load-extension` |
+| `E2E_FORCE_BUILD=1` | Always rebuild before running |
+| `E2E_SKIP_BUILD=1` | Never rebuild |
+| `CI=1` | Retries, `forbidOnly`, GitHub annotations and an HTML report |
+
 ---
 
 ## 📂 Repository Structure

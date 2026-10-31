@@ -11,8 +11,11 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --project=ui-mocked",
+    "test:e2e:extension": "playwright test --project=extension-runtime",
+    "test:e2e:report": "playwright show-report",
     "lint": "npm run build && cargo clippy --workspace --all-targets && cargo fmt --check",
-    "typecheck": "tsc --noEmit -p packages/protocol && tsc --noEmit -p packages/opencode-plugin && tsc --noEmit -p packages/agent-gateway && tsc --noEmit -p apps/chrome-extension",
+    "typecheck": "tsc --noEmit -p packages/protocol && tsc --noEmit -p packages/opencode-plugin && tsc --noEmit -p packages/agent-gateway && tsc --noEmit -p apps/chrome-extension && tsc -p tests/e2e/playwright",
     "gateway": "node packages/agent-gateway/dist/index.js",
     "gateway:jsonl": "node packages/agent-gateway/dist/index.js --jsonl",
     "gateway:manifest": "node packages/agent-gateway/dist/index.js --manifest"

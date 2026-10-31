@@ -1,41 +1,36 @@
 import { defineConfig, devices } from "@playwright/test";
-import path from "path";
 
-const extensionPath = path.resolve(__dirname, "apps/chrome-extension");
+const isCI = !!process.env.CI;
+const channel = process.env.PW_CHANNEL || "chrome";
 
 export default defineConfig({
   testDir: "./tests/e2e/playwright",
-  timeout: 30000,
-  expect: {
-    timeout: 5000,
-  },
-  fullyParallel: false,
-  workers: 1,
-  reporter: [["list"]],
+  globalSetup: "./tests/e2e/playwright/global-setup.ts",
+  outputDir: "./test-results/e2e",
+  timeout: 20_000,
+  expect: { timeout: 5_000 },
+  fullyParallel: true,
+  forbidOnly: isCI,
+  retries: isCI ? 2 : 0,
+  workers: isCI ? 2 : undefined,
+  reporter: isCI
+    ? [["github"], ["list"], ["html", { open: "never", outputFolder: "playwright-report" }]]
+    : [["list"], ["html", { open: "never", outputFolder: "playwright-report" }]],
   use: {
-    trace: "on-first-retry",
-    channel: "chrome",
-    headless: false,
+    ...devices["Desktop Chrome"],
+    channel,
+    headless: true,
+    trace: "retain-on-failure",
+    screenshot: "only-on-failure",
   },
   projects: [
     {
-      name: "chrome-extension-e2e",
-      use: {
-        ...devices["Desktop Chrome"],
-        channel: "chrome",
-        launchOptions: {
-          headless: false,
-          ignoreDefaultArgs: ["--disable-extensions"],
-          args: [
-            `--headless=new`,
-            `--disable-extensions-except=${extensionPath}`,
-            `--load-extension=${extensionPath}`,
-            `--allow-file-access-from-files`,
-            `--no-sandbox`,
-            `--disable-dev-shm-usage`,
-          ],
-        },
-      },
+      name: "ui-mocked",
+      testMatch: /(sidepanel|overlay_and_dock)\.spec\.ts$/,
+    },
+    {
+      name: "extension-runtime",
+      testMatch: /extension_browser\.spec\.ts$/,
     },
   ],
 });

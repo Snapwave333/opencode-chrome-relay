@@ -1,0 +1,15 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["node", "chrome"],
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true
+  },
+  "include": ["./**/*.ts", "../../../playwright.config.ts"]
+}
