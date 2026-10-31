@@ -196,21 +196,58 @@ opencode --plugin ./packages/opencode-plugin
 
 ### Option C: Universal CLI (`browser-relay` / `oc-relay`)
 
-Use the built-in CLI for ad-hoc browser inspections or shell scripting:
+Use the built-in CLI for ad-hoc browser inspections or shell scripting. Start with `doctor`: it checks Node, your relay environment variables, the broker binary, the extension build, the native host, the action journal, the broker connection, the extension link and your pinned tab, and prints a fix hint for each problem.
 
-```powershell
-# List all active browser tabs
-node packages/opencode-plugin/dist/cli.js list-tabs
-
-# Take an accessibility & DOM snapshot
-node packages/opencode-plugin/dist/cli.js snapshot --tab-id 123456
-
-# Click an element using semantic accessibility locators
-node packages/opencode-plugin/dist/cli.js click --role "button" --name "Save preferences"
-
-# Type into a labeled field
-node packages/opencode-plugin/dist/cli.js type --label "Search documentation" --text "Monotonic epoch fencing"
+```bash
+browser-relay doctor
 ```
+
+```bash
+browser-relay doctor --fix --json
+```
+
+| Doctor check | Fails when |
+| --- | --- |
+| Node.js runtime | Node < 20 (warns below 22.5, where `node:sqlite` is unavailable) |
+| Environment configuration | `RELAY_*` variables are malformed. Warns when `RELAY_RUN_ID` is unset, because parallel pipelines would share `run_1` |
+| Broker connection | Nothing answers at the broker URL (`--fix` starts the local `relay-broker` build) |
+| Chrome extension link | No extension answers a `browser_status` request, or the auth token is rejected |
+| Pinned tab | `RELAY_TAB_ID` points at a tab that is no longer open |
+| Extension build | `apps/chrome-extension/dist` is missing outputs |
+
+Doctor exits 1 on any failure, so it can gate a pipeline: `browser-relay doctor --json || exit 1`.
+
+```bash
+browser-relay help
+```
+
+```bash
+browser-relay help click
+```
+
+```bash
+browser-relay help --json
+```
+
+Everyday commands:
+
+```bash
+browser-relay tabs
+```
+
+```bash
+browser-relay snapshot --tab 123456
+```
+
+```bash
+browser-relay click "Save preferences"
+```
+
+```bash
+browser-relay type "#search" "Monotonic epoch fencing"
+```
+
+Typos get suggestions (`clik` → `Did you mean: click?`), and with `--json` errors are printed as `{"ok":false,"error":"..."}` on stdout.
 
 ### Option D: JSONL Stdio Transport
 

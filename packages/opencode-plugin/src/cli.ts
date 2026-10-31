@@ -10,14 +10,31 @@ import {
   isNativeDialogActive,
   NativeDialogResult,
 } from "./native_dialog.js";
+import os from "node:os";
+import { helpManifest, renderCommandHelp, renderOverview, resolveCommand, unknownCommandMessage } from "./cli_help.js";
+import {
+  brokerBinaryCandidates,
+  renderDoctorReport,
+  runDoctor,
+  type DoctorDeps,
+  type JournalStats,
+} from "./doctor.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, "../../..");
 const DEFAULT_BROKER_URL = process.env.RELAY_BROKER_URL || "ws://127.0.0.1:4098";
-const SQLITE_PATH = path.resolve(REPO_ROOT, "opencode_relay.sqlite");
-const BROKER_EXE_DEBUG = path.resolve(REPO_ROOT, "target/debug/relay-broker.exe");
-const BROKER_EXE_RELEASE = path.resolve(REPO_ROOT, "target/release/relay-broker.exe");
+const SQLITE_PATH = process.env.RELAY_DB_PATH
+  ? path.resolve(process.env.RELAY_DB_PATH)
+  : path.resolve(REPO_ROOT, "opencode_relay.sqlite");
+
+export const CLI_VERSION: string = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(path.resolve(__dirname, "../package.json"), "utf-8")).version || "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+})();
 
 export interface CliOptions {
   brokerUrl: string;
@@ -28,6 +45,8 @@ export interface CliOptions {
   newTab: boolean;
   background: boolean;
   follow: boolean;
+  fix: boolean;
+  cancel: boolean;
   verbose: boolean;
 }
 
@@ -56,6 +75,8 @@ export function parseCliArgs(argv: string[]): {
     newTab: false,
     background: /^(1|true|yes|on)$/i.test(process.env.RELAY_BACKGROUND || ""),
     follow: false,
+    fix: false,
+    cancel: false,
     verbose: false,
   };
   const positionals: string[] = [];
@@ -70,6 +91,12 @@ export function parseCliArgs(argv: string[]): {
       options.background = true;
     } else if (arg === "--follow" || arg === "-f") {
       options.follow = true;
+    } else if (arg === "--fix") {
+      options.fix = true;
+    } else if (arg === "--cancel" || arg === "-c") {
+      options.cancel = true;
+    } else if (arg === "--version" || arg === "-V") {
+      positionals.unshift("version");
     } else if (arg === "--verbose" || arg === "-v") {
       options.verbose = true;
     } else if (arg.startsWith("--tab=") || arg.startsWith("-t=")) {
@@ -170,11 +197,7 @@ export async function ensureBrokerConnected(url = DEFAULT_BROKER_URL): Promise<W
   let ws = await tryConnectBroker(url, 1200);
   if (ws) return ws;
 
-  const exePath = fs.existsSync(BROKER_EXE_DEBUG)
-    ? BROKER_EXE_DEBUG
-    : fs.existsSync(BROKER_EXE_RELEASE)
-      ? BROKER_EXE_RELEASE
-      : null;
+  const exePath = brokerBinaryCandidates(REPO_ROOT, process.platform).find((p) => fs.existsSync(p)) ?? null;
 
   if (exePath) {
     try {
@@ -413,7 +436,7 @@ async function printStatusAndJournal(options: CliOptions): Promise<void> {
   let dbActions: any[] = [];
   if (fs.existsSync(SQLITE_PATH)) {
     try {
-      const sqliteMod: any = await import("node:sqlite");
+      const sqliteMod: any = await importSqliteQuietly();
       const db = new sqliteMod.DatabaseSync(SQLITE_PATH, { open: true });
       dbRuns = db.prepare("SELECT * FROM runs ORDER BY updated_at DESC LIMIT 10").all();
       dbActions = db.prepare("SELECT * FROM action_journal ORDER BY created_at DESC LIMIT 15").all();
@@ -450,72 +473,76 @@ async function printStatusAndJournal(options: CliOptions): Promise<void> {
   }
 }
 
-function printHelp(): void {
-  console.log(`
-╔════════════════════════════════════════════════════════════════════════════╗
-║               OpenCode Chrome Relay CLI (browser-relay / oc-relay)         ║
-║         Universal Browser Control CLI for AI Agents on Your Laptop         ║
-╚════════════════════════════════════════════════════════════════════════════╝
+export function renderHelp(positionals: string[], json: boolean): string {
+  if (json) return JSON.stringify(helpManifest(CLI_VERSION), null, 2);
+  const topic = positionals[0];
+  if (!topic || topic === "help") return renderOverview(CLI_VERSION);
+  const spec = resolveCommand(topic);
+  if (!spec) throw new Error(unknownCommandMessage(topic));
+  return renderCommandHelp(spec);
+}
 
-USAGE:
-  browser-relay <command> [args...] [options]
-  oc-relay <command> [args...] [options]
+async function importSqliteQuietly(): Promise<any> {
+  const originalEmit = process.emitWarning;
+  process.emitWarning = ((warning: string | Error, ...rest: any[]) => {
+    const type = typeof rest[0] === "string" ? rest[0] : rest[0]?.type;
+    if (type === "ExperimentalWarning" && String(warning).includes("SQLite")) return;
+    return (originalEmit as any).call(process, warning, ...rest);
+  }) as typeof process.emitWarning;
+  try {
+    return await import("node:sqlite");
+  } finally {
+    process.emitWarning = originalEmit;
+  }
+}
 
-CORE COMMANDS (Deterministic Direct Execution):
-  status                         Check broker health, active sessions & SQLite journal
-  tabs                           List all open Chrome tabs across all windows
-  switch-tab <id|query>          Switch to Chrome tab by numeric ID or title/URL search query
-  new-tab [url]                  Open a new Chrome tab (default: https://www.google.com)
-  close-tab [--tab <id>]         Close the specified or active Chrome tab
-  nav <url-or-site>              Navigate tab to URL, domain, or site name ("google cloud credentials", "youtube studio")
-  reload                         Reload the active or specified Chrome tab
-  back                           Navigate backward in tab history
-  forward                        Navigate forward in tab history
-  url                            Print current tab URL
-  title                          Print current tab title
-  snapshot                       Observe live DOM: URL, title, headings & interactive elements with selectors
-  find <query>                   Search DOM text and interactive elements matching query with click indices
-  extract [selector]             Extract visible page text and links (or from a specific CSS selector)
-  eval <js-expression>           Execute arbitrary JavaScript in the live tab and return the result
-  click <index|name|sel|x,y>     Click button, link, menu item, element index (e.g. 3, [3]), or x,y
-  dblclick <index|name|sel|x,y>  Double-click button, link, cell, or element index
-  rightclick <index|name|sel|x,y> Right-click / trigger context menu on element
-  hover <index|name|sel|x,y>     Hover over an element to reveal dropdowns, submenus, or tooltips
-  type [target] <text>           Type text into input/textarea (or element index like 4)
-  clear [target]                 Clear text from input/textarea (or element index)
-  press <key>                    Press a keyboard key via CDP (Enter, Tab, Escape, ArrowDown, etc.)
-  select <selector> <value>      Select an option in a <select> dropdown
-  scroll <down|up|left|right> [px] Scroll the active tab viewport (default: 450px)
-  zoom <level>                   Set page zoom level (e.g. 125%, 1.5, or reset)
-  cookies [domain]               Inspect cookies for active tab
-  storage [key]                  Inspect localStorage and sessionStorage
-  wait <selector|text|ms>        Wait for a selector/text to appear or sleep N milliseconds
-  verify <selector|text>         Check if a selector or text exists on the current page
-  screenshot [output.png]        Capture a PNG screenshot via CDP and save to disk
-  pdf [output.pdf]               Generate and save a PDF document of the page via CDP
-  download <url> [filename]      Download a URL using your logged-in Chrome cookies
-  upload <selector> <files...>   Upload local files into a file input element
-  save-dialog                    Confirm and dismiss native OS Save As / download dialogue box
+async function readJournalStats(): Promise<JournalStats | null> {
+  if (!fs.existsSync(SQLITE_PATH)) return null;
+  const sqliteMod: any = await importSqliteQuietly();
+  const db = new sqliteMod.DatabaseSync(SQLITE_PATH, { readOnly: true });
+  try {
+    const cutoff = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const count = (sql: string, ...params: unknown[]) => Number(db.prepare(sql).get(...params)?.n ?? 0);
+    return {
+      path: SQLITE_PATH,
+      runs: count("SELECT COUNT(*) AS n FROM runs"),
+      actions: count("SELECT COUNT(*) AS n FROM action_journal"),
+      stale_pending: count("SELECT COUNT(*) AS n FROM action_journal WHERE status = 'pending' AND created_at < ?", cutoff),
+    };
+  } finally {
+    db.close();
+  }
+}
 
-INTERACTIVE & AUTOMATION UTILITIES:
-  repl                           Launch high-speed interactive shell with persistent broker connection
-  batch <file>                   Execute a sequence of browser-relay commands sequentially from file
-
-AUTONOMOUS MULTI-STEP AGENT & TELEMETRY COMMANDS:
-  agent "<goal>"                 Run the autonomous multi-step NVIDIA NIM browser agent and stream progress
-  control <pause|stop|restart>   Control an active autonomous run
-  monitor [--follow]             Inspect SQLite action journal and optionally stream live WebSocket events
-  reload-ext                     Remotely hot-reload the Chrome extension service worker
-
-GLOBAL OPTIONS:
-  --tab, -t <tabId>              Target a specific Chrome tab ID (default: $RELAY_TAB_ID, else active tab)
-  --new-tab, -n                  Open navigation target in a new Chrome tab
-  --background, -b               Open/navigate tabs without stealing focus (default: $RELAY_BACKGROUND)
-  --run, -r <runId>              Session run ID (default: $RELAY_RUN_ID, else run_1)
-  --timeout, -T <ms>             Action timeout in milliseconds (default: 18000)
-  --json, -j                     Output structured JSON for programmatic AI agent consumption
-  --verbose, -v                  Verbose logging mode
-`);
+export function defaultDoctorDeps(options: CliOptions): DoctorDeps {
+  return {
+    brokerUrl: options.brokerUrl,
+    env: process.env,
+    platform: process.platform,
+    nodeVersion: process.version,
+    repoRoot: REPO_ROOT,
+    homeDir: os.homedir(),
+    fileExists: (file) => fs.existsSync(file),
+    connect: tryConnectBroker,
+    startBroker: async () => {
+      try {
+        const ws = await ensureBrokerConnected(options.brokerUrl);
+        ws.close();
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    readJournal: readJournalStats,
+    registryHasKey: (key) => {
+      try {
+        execSync(`reg query "${key}"`, { stdio: "ignore", windowsHide: true });
+        return true;
+      } catch (error: any) {
+        return typeof error?.status === "number" ? false : null;
+      }
+    },
+  };
 }
 
 export function splitCommandLine(cmdLine: string): string[] {
@@ -533,7 +560,19 @@ export async function runCli(argv = process.argv.slice(2), existingWs?: WebSocke
   const { command, positionals, options } = parseCliArgs(argv);
 
   if (command === "help" || command === "--help" || command === "-h") {
-    printHelp();
+    console.log(renderHelp(positionals, options.json));
+    return;
+  }
+
+  if (command === "version") {
+    console.log(options.json ? JSON.stringify({ name: "browser-relay", version: CLI_VERSION }) : CLI_VERSION);
+    return;
+  }
+
+  if (command === "doctor" || command === "diagnose" || command === "check") {
+    const report = await runDoctor(defaultDoctorDeps(options), { fix: options.fix });
+    console.log(options.json ? JSON.stringify(report, null, 2) : renderDoctorReport(report));
+    if (!report.ok) process.exitCode = 1;
     return;
   }
 
@@ -610,7 +649,7 @@ export async function runCli(argv = process.argv.slice(2), existingWs?: WebSocke
     await printStatusAndJournal(options);
     if (options.follow) {
       const ws = await ensureBrokerConnected(options.brokerUrl);
-      console.log("📡 Streaming live events from ws://127.0.0.1:4098 (Ctrl+C to stop)...");
+      console.log(`📡 Streaming live events from ${options.brokerUrl} (Ctrl+C to stop)...`);
       ws.on("message", (data) => {
         console.log(`[${new Date().toISOString()}] ${data.toString()}`);
       });
@@ -662,7 +701,7 @@ export async function runCli(argv = process.argv.slice(2), existingWs?: WebSocke
 
   if (command === "save-dialog" || command === "confirm-dialog" || command === "accept-dialog") {
     const filename = positionals[0] || undefined;
-    const isCancel = argv.includes("--cancel") || argv.includes("-c");
+    const isCancel = options.cancel;
     const res = dismissNativeSaveDialog({ filename, action: isCancel ? "cancel" : "save" });
     if (res.dismissed) {
       if (options.json) {
@@ -1210,7 +1249,7 @@ export async function runCli(argv = process.argv.slice(2), existingWs?: WebSocke
     }
 
     default:
-      throw new Error(`Unknown command "${command}". Run "browser-relay help" for usage.`);
+      throw new Error(unknownCommandMessage(command));
   }
 
   const outcome = await executeRelayAction(action, options, existingWs);
@@ -1293,8 +1332,14 @@ const isMain =
     process.argv[1].endsWith("cli.js"));
 
 if (isMain) {
-  runCli().catch((err) => {
-    console.error(`❌ ${err.message || err}`);
+  const argv = process.argv.slice(2);
+  runCli(argv).catch((err) => {
+    const message = err?.message || String(err);
+    if (argv.includes("--json") || argv.includes("-j")) {
+      console.log(JSON.stringify({ ok: false, error: message }));
+    } else {
+      console.error(`❌ ${message}`);
+    }
     process.exit(1);
   });
 }
