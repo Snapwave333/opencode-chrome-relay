@@ -128,6 +128,10 @@ export class FakeBroker {
     throw new Error(`fake broker: no extension client has a tab at ${url}`);
   }
 
+  dropClients(): void {
+    for (const socket of this.sockets) socket.terminate();
+  }
+
   async close(): Promise<void> {
     for (const socket of this.sockets) socket.terminate();
     await new Promise<void>((resolve) => this.server.close(() => resolve()));

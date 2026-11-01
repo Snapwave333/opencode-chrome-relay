@@ -345,6 +345,9 @@ OpenCode Chrome Relay is engineered from the ground up around strict local-first
 2. **Origin Fencing:** Explicitly refuses attachment to `chrome://`, `chrome-extension://`, and protected internal browser spaces.
 3. **Sensitive Data Protection:** The extension never inspects or exports stored passwords, passkeys, credit cards, or OS credentials. Authentication challenges (2FA, CAPTCHA) are delegated to the user.
 4. **Zero Cloud Brokerage:** All broker IPC occurs strictly over loopback (`127.0.0.1` / named pipes) authenticated via local tokens. No third-party relays or telemetry servers.
+5. **Masked Secret Entry:** When the agent types into a password field, a field whose `autocomplete` marks it as a credential, one-time code or card number, or a field named like `otp`, `pin`, `cvv` or `token`, the on-page overlay shows `••••••••` with no character count. The plaintext is never placed in the page-visible visual event.
+6. **No Markup Injection:** Element labels, typed text, URLs and outcome messages are HTML-escaped before they are rendered in the overlay, so page or agent-supplied strings cannot inject markup or event handlers.
+7. **Minimal Page Footprint:** The content script adds nothing to a page until the agent acts on it, and only the visible tab sends the keep-alive heartbeat.
 
 ---
 

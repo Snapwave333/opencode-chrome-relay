@@ -2,6 +2,16 @@ import { OVERLAY_CONTAINER_ID, COLORS, M3_COLORS } from "../shared/constants.js"
 import { ActionPayload } from "@opencode/chrome-relay-protocol";
 import { resolveElementLocator } from "../browser/locators.js";
 import { getMaterial3Svg, Material3IconName } from "../shared/material_icons.js";
+import { isSensitiveField, isSensitiveLocator, maskSecret } from "../shared/sensitive.js";
+
+function esc(value: unknown): string {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
 
 export class ActionOverlay {
   private container: HTMLDivElement | null = null;
@@ -692,13 +702,21 @@ export class ActionOverlay {
         captionText = "Inspecting";
     }
 
-    // Resolve target box
     let targetBox: any = null;
+    let targetElement: Element | undefined;
     if (action.locator) {
       const res = resolveElementLocator(action.locator, document);
       if (res.found && res.box) {
         targetBox = res.box;
+        targetElement = res.element;
       }
+    }
+
+    const sensitive =
+      (action.type === "browser_type" || action.type === "browser_keypress") &&
+      (isSensitiveField(targetElement) || isSensitiveLocator(action.locator));
+    if (action.type === "browser_type" && sensitive) {
+      captionText = `Typing "${maskSecret()}"`;
     }
 
     if (targetBox && this.boxElement && this.captionElement) {
@@ -712,7 +730,7 @@ export class ActionOverlay {
       this.captionElement.style.left = `${Math.max(4, targetBox.x)}px`;
       this.captionElement.style.top = `${Math.max(20, targetBox.y)}px`;
       const targetLabel = action.locator?.name || action.locator?.role || "";
-      this.captionElement.innerHTML = `${getMaterial3Svg(iconName, 14)} <span>${captionText}${targetLabel ? ": " + targetLabel : ""}</span>`;
+      this.captionElement.innerHTML = `${getMaterial3Svg(iconName, 14)} <span>${esc(captionText)}${targetLabel ? ": " + esc(targetLabel) : ""}</span>`;
 
       // Move animated agent cursor to the target
       this.updateAgentCursor(targetBox.centerX, targetBox.centerY, cursorMode, captionText);
@@ -720,7 +738,7 @@ export class ActionOverlay {
       if (action.type === "browser_click") {
         this.triggerClickShockwave(targetBox.centerX, targetBox.centerY);
       } else if (action.type === "browser_type") {
-        this.showTypingHud(targetBox.x, targetBox.y - 40, action.text || "");
+        this.showTypingHud(targetBox.x, targetBox.y - 40, action.text || "", sensitive);
       }
     }
 
@@ -737,6 +755,7 @@ export class ActionOverlay {
     key?: string;
     direction?: string;
     amount?: number;
+    sensitive?: boolean;
   }): void {
     if (!this.shadow) this.init();
     if (this.clearTimer) clearTimeout(this.clearTimer);
@@ -764,13 +783,13 @@ export class ActionOverlay {
         this.captionElement.style.display = "flex";
         this.captionElement.style.left = `${Math.max(4, rect.left)}px`;
         this.captionElement.style.top = `${Math.max(20, rect.top)}px`;
-        this.captionElement.innerHTML = `${getMaterial3Svg("touch_app", 14)} <span>Clicked: ${label || "Element"}</span>`;
+        this.captionElement.innerHTML = `${getMaterial3Svg("touch_app", 14)} <span>Clicked: ${esc(label || "Element")}</span>`;
       }
     } else if (type === "type") {
       this.boxElement?.classList.add("type-mode");
       this.updateAgentCursor(x, y, "typing", `Typing`);
       if (rect) {
-        this.showTypingHud(rect.left, rect.top - 44, text || "");
+        this.showTypingHud(rect.left, rect.top - 44, text || "", Boolean(detail.sensitive));
       }
     } else if (type === "hover") {
       this.boxElement?.classList.add("hover-mode");
@@ -780,7 +799,7 @@ export class ActionOverlay {
         this.captionElement.style.display = "flex";
         this.captionElement.style.left = `${Math.max(4, rect.left)}px`;
         this.captionElement.style.top = `${Math.max(20, rect.top)}px`;
-        this.captionElement.innerHTML = `${getMaterial3Svg("visibility", 14)} <span>Hovering: ${label || "Element"}</span>`;
+        this.captionElement.innerHTML = `${getMaterial3Svg("visibility", 14)} <span>Hovering: ${esc(label || "Element")}</span>`;
       }
     } else if (type === "keypress") {
       this.updateAgentCursor(x, y, "typing", `Key`);
@@ -846,7 +865,7 @@ export class ActionOverlay {
     this.keypressHudElement.style.top = `${Math.max(30, y - 48)}px`;
     this.keypressHudElement.innerHTML = `
       <span>Key:</span>
-      <span class="keypress-keycap">${keySymbol}</span>
+      <span class="keypress-keycap">${esc(keySymbol)}</span>
     `;
     setTimeout(() => {
       if (this.keypressHudElement) this.keypressHudElement.style.display = "none";
@@ -858,7 +877,7 @@ export class ActionOverlay {
     this.downloadHudElement.style.display = "flex";
     this.downloadHudElement.innerHTML = `
       <span class="download-spinner">⬇️</span>
-      <span>${title}</span>
+      <span>${esc(title)}</span>
     `;
     setTimeout(() => {
       if (this.downloadHudElement) this.downloadHudElement.style.display = "none";
@@ -918,7 +937,7 @@ export class ActionOverlay {
     }, 750);
   }
 
-  public showTypingHud(x: number, y: number, text: string): void {
+  public showTypingHud(x: number, y: number, text: string, sensitive = false): void {
     if (!this.typingHudElement) return;
 
     this.typingHudElement.style.display = "flex";
@@ -926,10 +945,14 @@ export class ActionOverlay {
     this.typingHudElement.style.top = `${Math.max(12, y)}px`;
 
     if (this.typingHudText) {
-      this.typingHudText.textContent = text ? `Typing: "${text}"` : "Typing text...";
+      this.typingHudText.textContent = sensitive
+        ? `Typing: "${maskSecret()}"`
+        : text
+          ? `Typing: "${text}"`
+          : "Typing text...";
     }
     if (this.typingHudCount) {
-      this.typingHudCount.textContent = `${text.length} chars`;
+      this.typingHudCount.textContent = sensitive ? "hidden" : `${text.length} chars`;
     }
   }
 
@@ -941,13 +964,13 @@ export class ActionOverlay {
     if (success) {
       this.boxElement.classList.add("verified");
       this.captionElement.classList.add("verified");
-      this.captionElement.innerHTML = `${getMaterial3Svg("check_circle", 14)} <span>Verified ${message || ""}</span>`;
+      this.captionElement.innerHTML = `${getMaterial3Svg("check_circle", 14)} <span>Verified ${esc(message || "")}</span>`;
       badge?.classList.add("verified");
       if (this.cursorBadgeText) this.cursorBadgeText.textContent = "Verified";
     } else {
       this.boxElement.classList.add("failed");
       this.captionElement.classList.add("failed");
-      this.captionElement.innerHTML = `${getMaterial3Svg("cancel", 14)} <span>Failed: ${message || "Action not confirmed"}</span>`;
+      this.captionElement.innerHTML = `${getMaterial3Svg("cancel", 14)} <span>Failed: ${esc(message || "Action not confirmed")}</span>`;
     }
 
     if (this.clearTimer) clearTimeout(this.clearTimer);
@@ -986,7 +1009,7 @@ export class ActionOverlay {
         ? "arrow_forward"
         : "arrow_back";
 
-    this.edgeScrollMarker.innerHTML = `${getMaterial3Svg(arrowIcon, 15)} <span>Scrolling ${direction.toUpperCase()} (${amount}px)</span>`;
+    this.edgeScrollMarker.innerHTML = `${getMaterial3Svg(arrowIcon, 15)} <span>Scrolling ${esc(direction.toUpperCase())} (${esc(amount)}px)</span>`;
     this.edgeScrollMarker.style.display = "flex";
 
     if (direction === "down") {
@@ -1013,7 +1036,7 @@ export class ActionOverlay {
 
   public showToast(iconName: Material3IconName, text: string, durationMs = 2000): void {
     if (!this.floatingToast) return;
-    this.floatingToast.innerHTML = `${getMaterial3Svg(iconName, 16)} <span>${text}</span>`;
+    this.floatingToast.innerHTML = `${getMaterial3Svg(iconName, 16)} <span>${esc(text)}</span>`;
     this.floatingToast.style.display = "flex";
 
     if (this.clearTimer) clearTimeout(this.clearTimer);

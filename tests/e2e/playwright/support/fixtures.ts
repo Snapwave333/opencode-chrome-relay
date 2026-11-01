@@ -180,10 +180,18 @@ export const test = base.extend<UiFixtures & ExtensionTestFixtures, WorkerFixtur
 export async function sendToTab(worker: Worker, pageUrl: string, message: Record<string, unknown>): Promise<void> {
   await worker.evaluate(
     async ({ url, msg }) => {
-      const tabs = await chrome.tabs.query({});
-      const tab = tabs.find((t) => t.url === url);
-      if (!tab?.id) throw new Error(`no tab open at ${url}`);
-      await chrome.tabs.sendMessage(tab.id, msg);
+      for (let attempt = 0; ; attempt++) {
+        const tabs = await chrome.tabs.query({});
+        const tab = tabs.find((t) => t.url === url);
+        try {
+          if (!tab?.id) throw new Error(`no tab open at ${url}`);
+          await chrome.tabs.sendMessage(tab.id, msg);
+          return;
+        } catch (error) {
+          if (attempt >= 40) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+      }
     },
     { url: pageUrl, msg: message }
   );

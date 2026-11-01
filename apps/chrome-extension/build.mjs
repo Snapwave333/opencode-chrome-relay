@@ -31,6 +31,9 @@ execSync("npx tsc", { stdio: "inherit" });
 await esbuild.build({
   entryPoints: ["src/content/index.ts"],
   bundle: true,
+  minify: true,
+  legalComments: "none",
+  target: "chrome114",
   outfile: "dist/content/index.js",
 });
 
@@ -47,6 +50,9 @@ await esbuild.build({
 await esbuild.build({
   entryPoints: ["src/sidepanel/sidepanel.ts"],
   bundle: true,
+  minify: true,
+  legalComments: "none",
+  target: "chrome114",
   outfile: "dist/sidepanel/sidepanel.js",
 });
 

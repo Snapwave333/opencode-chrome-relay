@@ -27,12 +27,46 @@ test.describe("Sidepanel cockpit with a connected bridge", () => {
     expect(await relay.sentOfType("GET_BRIDGE_STATUS")).toHaveLength(1);
   });
 
-  test("has no WCAG 2.1 AA violations beyond tracked issues", async ({ page }) => {
-    test.info().annotations.push({
-      type: "known-issue",
-      description: "nested-interactive: .session-tab is a tab that contains a close button",
-    });
-    expect(await axeViolations(page, { knownIssues: ["nested-interactive"] })).toEqual([]);
+  test("has no WCAG 2.1 AA violations", async ({ page }) => {
+    await page.click("#btn-new-session");
+    expect(await axeViolations(page)).toEqual([]);
+  });
+
+  test("session tabs follow the ARIA tablist keyboard pattern", async ({ page }) => {
+    await page.click("#btn-new-session");
+    await page.click("#btn-new-session");
+    const tabs = page.getByRole("tab");
+    await expect(tabs).toHaveCount(3);
+    await expect(page.getByRole("tab", { selected: true })).toHaveText("Task 3");
+
+    await page.getByRole("tab", { name: "Task 3" }).focus();
+    await page.keyboard.press("ArrowRight");
+    await expect(page.getByRole("tab", { selected: true })).toHaveText("Task 1");
+    await expect(page.getByRole("tab", { name: "Task 1" })).toBeFocused();
+    await expect(page.locator("#session-name")).toHaveText("Task 1");
+
+    await page.keyboard.press("ArrowLeft");
+    await expect(page.getByRole("tab", { selected: true })).toHaveText("Task 3");
+    await page.keyboard.press("Home");
+    await expect(page.getByRole("tab", { selected: true })).toHaveText("Task 1");
+    await page.keyboard.press("End");
+    await expect(page.getByRole("tab", { selected: true })).toHaveText("Task 3");
+
+    await expect(page.locator('[role="tab"][tabindex="0"]')).toHaveCount(1);
+
+    await page.keyboard.press("Delete");
+    await expect(tabs).toHaveCount(2);
+    await expect(page.getByRole("tab", { selected: true })).toBeFocused();
+  });
+
+  test("shows a neutral status until the worker answers, then live bridge updates", async ({ page, relay }) => {
+    await expect(page.locator("#bridge-status-text")).toHaveText("Connected");
+    await relay.emit({ type: "BRIDGE_STATUS", connected: false });
+    await expect(page.locator("#bridge-status-text")).toHaveText("Offline");
+    await expect(page.locator("#bridge-status-badge")).toHaveClass(/disconnected/);
+    await relay.emit({ type: "BRIDGE_STATUS", connected: true });
+    await expect(page.locator("#bridge-status-text")).toHaveText("Connected");
+    await expect(page.locator(".timeline-entry")).toHaveCount(0);
   });
 
   test("has no WCAG 2.1 AA violations with the delete dialog open", async ({ page }) => {

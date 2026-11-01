@@ -134,6 +134,27 @@ test.describe("Broker → extension → page round trip", () => {
 });
 
 test.describe("Broker ↔ side panel relay", () => {
+  test("side panel status follows the live bridge: drop shows Offline, reconnect shows Connected", async ({
+    relayTarget,
+    extensionContext,
+    extensionId,
+  }) => {
+    const panel = await extensionContext.newPage();
+    try {
+      await panel.goto(`chrome-extension://${extensionId}/dist/sidepanel/index.html`);
+      await expect(panel.locator("#bridge-status-text")).toHaveText("Connected");
+
+      relayTarget.broker.dropClients();
+      await expect(panel.locator("#bridge-status-text")).toHaveText("Offline");
+      await expect(panel.locator("#bridge-status-badge")).toHaveClass(/disconnected/);
+
+      await expect(panel.locator("#bridge-status-text")).toHaveText("Connected", { timeout: 10_000 });
+      await expect(panel.locator("#bridge-status-badge")).toHaveClass(/\bconnected/);
+    } finally {
+      await panel.close();
+    }
+  });
+
   test("shows a live connection, renders broker events, and forwards controls to the broker", async ({
     relayTarget,
     extensionContext,

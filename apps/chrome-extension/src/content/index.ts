@@ -4,9 +4,8 @@ import { InPageDock } from "./dock.js";
 const overlay = new ActionOverlay();
 const dock = new InPageDock();
 
-overlay.init();
-
 function pingBackgroundWorker(): void {
+  if (document.visibilityState !== "visible") return;
   try {
     chrome.runtime.sendMessage({ type: "GET_BRIDGE_STATUS" }, () => {
       const _ignore = chrome.runtime.lastError;
@@ -18,6 +17,7 @@ function pingBackgroundWorker(): void {
 
 pingBackgroundWorker();
 setInterval(pingBackgroundWorker, 15000);
+document.addEventListener("visibilitychange", pingBackgroundWorker);
 
 // Listen to messages from background worker
 chrome.runtime.onMessage.addListener((msg) => {

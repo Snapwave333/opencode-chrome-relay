@@ -6,6 +6,7 @@ export class NativeBridgePort {
   private pendingQueue: string[] = [];
   private messageListeners: ((msg: any) => void)[] = [];
   private disconnectListeners: (() => void)[] = [];
+  private connectListeners: (() => void)[] = [];
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private keepAliveInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -25,6 +26,9 @@ export class NativeBridgePort {
         while (this.pendingQueue.length > 0 && ws.readyState === WebSocket.OPEN) {
           const item = this.pendingQueue.shift()!;
           ws.send(item);
+        }
+        for (const listener of this.connectListeners) {
+          listener();
         }
       };
       ws.onmessage = (ev) => {
@@ -135,11 +139,15 @@ export class NativeBridgePort {
     this.disconnectListeners.push(listener);
   }
 
+  public onConnect(listener: () => void): void {
+    this.connectListeners.push(listener);
+  }
+
   public isConnected(): boolean {
     if (this.ws !== null && this.ws.readyState === WebSocket.OPEN) {
       return true;
     }
     this.connect();
-    return this.ws !== null && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING);
+    return false;
   }
 }

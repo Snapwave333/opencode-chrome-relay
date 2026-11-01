@@ -10,6 +10,16 @@ const nativePort = new NativeBridgePort();
 const tabManager = new TabManager();
 const cdp = new CDPController();
 const tabActionQueue = new KeyedSerialQueue();
+let lastBroadcastBridgeState: boolean | null = null;
+
+function broadcastBridgeStatus(connected: boolean): void {
+  if (lastBroadcastBridgeState === connected) return;
+  lastBroadcastBridgeState = connected;
+  chrome.runtime.sendMessage({ type: "BRIDGE_STATUS", connected }).catch(() => undefined);
+}
+
+nativePort.onConnect(() => broadcastBridgeStatus(true));
+nativePort.onDisconnect(() => broadcastBridgeStatus(false));
 const TAB_AGNOSTIC_ACTIONS = new Set(["browser_list_tabs", "browser_new_tab", "browser_status"]);
 
 function runTabScoped<T>(envelope: ProtocolEnvelope, task: () => Promise<T>): Promise<T> {
@@ -863,6 +873,14 @@ async function handleActionRequest(
             const cx = rect.left + rect.width / 2;
             const cy = rect.top + rect.height / 2;
             const targetLabel = target.getAttribute("aria-label") || target.placeholder || target.tagName;
+            const sensitiveHints = ["name", "id", "aria-label", "placeholder", "autocomplete", "data-testid"]
+              .map((attr) => target.getAttribute(attr) || "")
+              .join(" ");
+            const sensitive =
+              (target.tagName === "INPUT" && ((target as HTMLInputElement).type || "").toLowerCase() === "password") ||
+              /current-password|new-password|one-time-code|cc-number|cc-csc|pass(word|code|phrase)?|passwd|pwd|secret|token|api.?key|otp|one.?time|2fa|mfa|totp|\bpin\b|cvv|cvc|csc|security.?code|card.?number|cc.?num|ssn/i.test(
+                sensitiveHints
+              );
 
             try {
               window.dispatchEvent(
@@ -872,7 +890,8 @@ async function handleActionRequest(
                     x: cx,
                     y: cy,
                     rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
-                    text,
+                    text: sensitive ? "" : text,
+                    sensitive,
                     label: targetLabel,
                   },
                 })

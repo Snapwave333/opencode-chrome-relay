@@ -23,13 +23,16 @@ test.beforeEach(async ({ page, relay, pageErrors }) => {
   await page.clock.install();
   await page.goto(`file://${TEST_PAGE}`);
   await page.addScriptTag({ path: CONTENT_SCRIPT });
-  await expect(page.locator(`#${OVERLAY_HOST_ID}`)).toBeAttached();
-  expect(await relay.listenerCount()).toBe(1);
+  await expect.poll(() => relay.listenerCount()).toBe(1);
 });
 
 test.describe("In-page action overlay", () => {
-  test("mounts one transparent host that never steals page input and heartbeats the worker", async ({ page, relay }) => {
+  test("leaves the page untouched until the agent acts, then mounts one transparent host", async ({ page, relay }) => {
     const host = page.locator(`#${OVERLAY_HOST_ID}`);
+    await expect(host).toHaveCount(0);
+    await relay.emit({ type: "OVERLAY_ACTION_PREVIEW", action: { type: "browser_click", locator: { selector: "#target-button" } } });
+    await relay.emit({ type: "OVERLAY_ACTION_PREVIEW", action: { type: "browser_click", locator: { selector: "#target-button" } } });
+    await expect(host).toHaveCount(1);
     await expect(host).toHaveCSS("pointer-events", "none");
     await expect(host).toHaveCSS("position", "fixed");
 
@@ -41,6 +44,71 @@ test.describe("In-page action overlay", () => {
     expect(await relay.sentOfType("GET_BRIDGE_STATUS")).toHaveLength(1);
     await page.clock.runFor(15_000);
     expect(await relay.sentOfType("GET_BRIDGE_STATUS")).toHaveLength(2);
+  });
+
+  test("hidden tabs skip the heartbeat and ping again when they become visible", async ({ page, relay }) => {
+    await page.evaluate(() => {
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+    });
+    await page.clock.runFor(30_000);
+    expect(await relay.sentOfType("GET_BRIDGE_STATUS")).toHaveLength(1);
+
+    await page.evaluate(() => {
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(await relay.sentOfType("GET_BRIDGE_STATUS")).toHaveLength(2);
+  });
+
+  test("masks typing into password fields in the caption and HUD", async ({ page, relay }) => {
+    const host = page.locator(`#${OVERLAY_HOST_ID}`);
+    await relay.emit({
+      type: "OVERLAY_ACTION_PREVIEW",
+      action: { type: "browser_type", text: "hunter2-secret", locator: { selector: "#password-input" } },
+    });
+    await expect(host.locator(".caption-badge")).toContainText('Typing "••••••••"');
+    await expect(host.locator(".typing-hud")).toContainText("hidden");
+    expect(await host.evaluate((el) => el.shadowRoot!.textContent)).not.toContain("hunter2");
+  });
+
+  test("masks fields that look like one-time codes even when they are plain text inputs", async ({ page, relay }) => {
+    const host = page.locator(`#${OVERLAY_HOST_ID}`);
+    await relay.emit({
+      type: "OVERLAY_ACTION_PREVIEW",
+      action: { type: "browser_type", text: "482913", locator: { selector: "#otp-input" } },
+    });
+    await expect(host.locator(".typing-hud")).toBeVisible();
+    expect(await host.evaluate((el) => el.shadowRoot!.textContent)).not.toContain("482913");
+  });
+
+  test("masks sensitive DOM visual typing events", async ({ page }) => {
+    await dispatchVisualAction(page, {
+      type: "type",
+      x: 50,
+      y: 50,
+      rect: { left: 40, top: 120, width: 200, height: 30 },
+      text: "",
+      sensitive: true,
+    });
+    const hud = page.locator(`#${OVERLAY_HOST_ID} .typing-hud`);
+    await expect(hud).toContainText("••••••••");
+    await expect(hud).toContainText("hidden");
+  });
+
+  test("renders agent-supplied strings as text, never as markup", async ({ page, relay }) => {
+    const host = page.locator(`#${OVERLAY_HOST_ID}`);
+    const payload = `<img src=x onerror="window.__pwned=1">`;
+    await relay.emit({
+      type: "OVERLAY_ACTION_PREVIEW",
+      action: { type: "browser_click", locator: { selector: "#target-button", name: payload } },
+    });
+    await relay.emit({ type: "OVERLAY_ACTION_OUTCOME", success: false, message: payload });
+    await relay.emit({ type: "OVERLAY_ACTION_PREVIEW", action: { type: "browser_wait", predicate: payload } });
+
+    await expect(host.locator(".caption-badge")).toContainText("<img src=x");
+    await expect(host.locator(".floating-toast")).toContainText("<img src=x");
+    expect(await host.evaluate((el) => el.shadowRoot!.querySelectorAll("img").length)).toBe(0);
+    expect(await page.evaluate(() => (window as any).__pwned)).toBeUndefined();
   });
 
   test("click preview frames the target, labels it, and moves the agent cursor", async ({ page, relay }) => {

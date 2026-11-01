@@ -94,36 +94,36 @@ renderTabs();
 updateActiveSessionDisplay();
 
 // Query bridge status from background
+function renderBridgeStatus(connected: boolean): void {
+  statusText.textContent = connected ? "Connected" : "Offline";
+  statusBadge.className = `status-badge ${connected ? "connected" : "disconnected"}`;
+}
+
 chrome.runtime.sendMessage({ type: "GET_BRIDGE_STATUS" }, (response) => {
-  if (response?.connected) {
-    statusText.textContent = "Connected";
-    statusBadge.className = "status-badge connected";
-  } else {
-    statusText.textContent = "Offline";
-    statusBadge.className = "status-badge disconnected";
-  }
+  renderBridgeStatus(Boolean(response?.connected));
 });
 
 // Render session tabs
 function renderTabs(): void {
   tabsList.innerHTML = "";
   for (const session of sessions.values()) {
+    const isActive = session.runId === activeRunId;
     const tabEl = document.createElement("div");
-    tabEl.className = `session-tab ${session.runId === activeRunId ? "active" : ""}`;
+    tabEl.className = `session-tab ${isActive ? "active" : ""}`;
     tabEl.title = `${session.name} (${session.isPinned ? "Pinned" : "Unpinned"})`;
-    tabEl.role = "tab";
-    tabEl.tabIndex = session.runId === activeRunId ? 0 : -1;
-    tabEl.setAttribute("aria-selected", String(session.runId === activeRunId));
+    tabEl.setAttribute("role", "presentation");
     tabEl.onclick = () => switchSession(session.runId);
-    tabEl.onkeydown = (event) => {
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        switchSession(session.runId);
-      }
-    };
 
     const titleSpan = document.createElement("span");
+    titleSpan.className = "session-tab-label";
     titleSpan.textContent = session.name;
+    titleSpan.setAttribute("role", "tab");
+    titleSpan.dataset.runId = session.runId;
+    titleSpan.tabIndex = isActive ? 0 : -1;
+    titleSpan.setAttribute("aria-selected", String(isActive));
+    titleSpan.setAttribute("aria-keyshortcuts", "Delete");
+    titleSpan.title = `${session.name}: arrow keys switch, Delete closes`;
+    titleSpan.onkeydown = (event) => handleTabKeydown(event, session.runId);
 
     const pinIndicator = document.createElement("button");
     pinIndicator.type = "button";
@@ -136,6 +136,8 @@ function renderTabs(): void {
       "aria-label",
       session.isPinned ? `Unpin ${session.name}` : `Pin ${session.name}`
     );
+    pinIndicator.tabIndex = -1;
+    pinIndicator.setAttribute("aria-hidden", "true");
     pinIndicator.onclick = (e) => {
       e.stopPropagation();
       togglePin(session.runId);
@@ -148,6 +150,9 @@ function renderTabs(): void {
       ? "Pinned session (unpin first to close)"
       : "Close session";
     closeBtn.setAttribute("aria-label", `Close ${session.name}`);
+    closeBtn.type = "button";
+    closeBtn.tabIndex = -1;
+    closeBtn.setAttribute("aria-hidden", "true");
     closeBtn.onclick = (e) => {
       e.stopPropagation();
       closeSession(session.runId);
@@ -158,6 +163,28 @@ function renderTabs(): void {
     tabEl.appendChild(closeBtn);
     tabsList.appendChild(tabEl);
   }
+}
+
+function handleTabKeydown(event: KeyboardEvent, runId: string): void {
+  const ids = [...sessions.keys()];
+  const index = ids.indexOf(runId);
+  let target: string | undefined;
+  if (event.key === "Enter" || event.key === " ") target = runId;
+  else if (event.key === "ArrowRight") target = ids[(index + 1) % ids.length];
+  else if (event.key === "ArrowLeft") target = ids[(index - 1 + ids.length) % ids.length];
+  else if (event.key === "Home") target = ids[0];
+  else if (event.key === "End") target = ids[ids.length - 1];
+  else if (event.key === "Delete") {
+    event.preventDefault();
+    closeSession(runId);
+    tabsList.querySelector<HTMLElement>('.session-tab-label[tabindex="0"]')?.focus();
+    return;
+  }
+  if (!target) return;
+  event.preventDefault();
+  switchSession(target);
+  const next = tabsList.querySelector<HTMLElement>(`.session-tab-label[data-run-id="${CSS.escape(target)}"]`);
+  next?.focus();
 }
 
 function switchSession(runId: string): void {
@@ -650,6 +677,10 @@ function dispatchControl(command: string, instruction?: string): void {
 
 // Listen for broadcast events from background
 chrome.runtime.onMessage.addListener((msg) => {
+  if (msg?.type === "BRIDGE_STATUS") {
+    renderBridgeStatus(Boolean(msg.connected));
+    return;
+  }
   const targetRunId = msg.run_id || activeRunId;
   const session = sessions.get(targetRunId);
   if (!session) return;

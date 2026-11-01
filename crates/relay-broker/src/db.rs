@@ -19,6 +19,10 @@ impl Database {
 
     pub fn new(path: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        conn.pragma_update(None, "temp_store", "MEMORY")?;
         let db = Database {
             conn: Arc::new(Mutex::new(conn)),
         };
@@ -327,5 +331,25 @@ impl Database {
             params![tab_id, run_id],
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod pragma_tests {
+    use super::*;
+
+    #[test]
+    fn file_databases_use_wal_with_normal_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::new(dir.path().join("relay.sqlite").to_str().unwrap()).unwrap();
+        let conn = db.conn.lock().unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        let sync: i64 = conn
+            .query_row("PRAGMA synchronous", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode.to_lowercase(), "wal");
+        assert_eq!(sync, 1);
     }
 }

@@ -60,15 +60,22 @@ test.describe("Extension runtime in real Chrome", () => {
     }
   });
 
-  test("injects a closed-shadow overlay host into web pages without blocking interaction", async ({
+  test("injects a closed-shadow overlay host only once the agent acts, without blocking interaction", async ({
     extPage,
     shadow,
+    serviceWorker,
     fixtureServerUrl,
   }) => {
-    await extPage.goto(`${fixtureServerUrl}/test_page.html`);
+    const url = `${fixtureServerUrl}/test_page.html`;
+    await extPage.goto(url);
     await expect(extPage).toHaveTitle("OpenCode Relay Target Page");
 
     const host = extPage.locator(`#${OVERLAY_HOST_ID}`);
+    await expect(host).toHaveCount(0);
+    await sendToTab(serviceWorker, url, {
+      type: "OVERLAY_ACTION_PREVIEW",
+      action: { type: "browser_scroll", scroll_direction: "down", scroll_amount: 1 },
+    });
     await expect(host).toBeAttached();
     await expect(host).toHaveCount(1);
     await expect(host).toHaveCSS("pointer-events", "none");
@@ -88,7 +95,6 @@ test.describe("Extension runtime in real Chrome", () => {
   }) => {
     const url = `${fixtureServerUrl}/test_page.html`;
     await extPage.goto(url);
-    await expect(extPage.locator(`#${OVERLAY_HOST_ID}`)).toBeAttached();
 
     await sendToTab(serviceWorker, url, {
       type: "OVERLAY_ACTION_PREVIEW",
@@ -122,7 +128,6 @@ test.describe("Extension runtime in real Chrome", () => {
   }) => {
     const url = `${fixtureServerUrl}/test_page.html`;
     await extPage.goto(url);
-    await expect(extPage.locator(`#${OVERLAY_HOST_ID}`)).toBeAttached();
 
     await serviceWorker.evaluate(() => {
       const scope = globalThis as any;
@@ -161,14 +166,8 @@ test.describe("Extension runtime in real Chrome", () => {
   });
 
   test("reports an offline bridge when no broker is reachable", async ({ extPage, extensionId }) => {
-    test.fail(
-      true,
-      "Known bug: NativeBridgePort.isConnected() treats a CONNECTING WebSocket as connected, so an unreachable broker is reported as Connected"
-    );
-    test.setTimeout(10_000);
-
     await extPage.goto(`chrome-extension://${extensionId}/${manifest.side_panel.default_path}`);
-    await expect(extPage.locator("#bridge-status-text")).toHaveText("Offline", { timeout: 3_000 });
+    await expect(extPage.locator("#bridge-status-text")).toHaveText("Offline");
     await expect(extPage.locator("#bridge-status-badge")).toHaveClass(/disconnected/);
   });
 });

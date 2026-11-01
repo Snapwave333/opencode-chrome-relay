@@ -287,6 +287,13 @@ body {
   box-shadow: 0 0 10px rgba(128, 213, 232, 0.25);
 }
 
+.session-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-radius: var(--md-shape-corner-full);
+  outline: none;
+}
+
 .tab-pin-indicator {
   display: inline-flex;
   align-items: center;
@@ -834,7 +841,7 @@ body {
   background: var(--md-sys-color-surface-container-high);
 }
 
-.session-tab:focus-visible,
+.session-tab-label:focus-visible,
 .tab-close-btn:focus-visible,
 .tab-pin-indicator:focus-visible,
 button:focus-visible,

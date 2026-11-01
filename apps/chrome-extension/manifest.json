@@ -3,6 +3,7 @@
   "name": "OpenCode Chrome Relay",
   "version": "1.0.0",
   "description": "Browser-native agent cockpit pairing your personal Chrome profile with OpenCode.",
+  "minimum_chrome_version": "114",
   "permissions": [
     "sidePanel",
     "debugger",
