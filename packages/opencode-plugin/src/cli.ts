@@ -1,15 +1,13 @@
 #!/usr/bin/env node
 import WebSocket from "ws";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { spawn, execSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { ActionPayload, BrowserActionType } from "@opencode/chrome-relay-protocol";
-import {
-  dismissNativeSaveDialog,
-  isNativeDialogActive,
-  NativeDialogResult,
-} from "./native_dialog.js";
+import { dismissNativeSaveDialog } from "./native_dialog.js";
+import { loadAuthToken } from "./client.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -28,6 +26,15 @@ export interface CliOptions {
   newTab: boolean;
   follow: boolean;
   verbose: boolean;
+  approve: boolean;
+}
+
+// "5s" or "abc" would otherwise become a 5 ms or NaN timeout
+function positiveInt(raw: string, flag: string): number {
+  if (!/^\d+$/.test(raw) || Number(raw) <= 0) {
+    throw new Error(`${flag} needs a positive whole number, got "${raw}"`);
+  }
+  return Number(raw);
 }
 
 export function parseCliArgs(argv: string[]): {
@@ -43,6 +50,7 @@ export function parseCliArgs(argv: string[]): {
     newTab: false,
     follow: false,
     verbose: false,
+    approve: false,
   };
   const positionals: string[] = [];
 
@@ -56,18 +64,20 @@ export function parseCliArgs(argv: string[]): {
       options.follow = true;
     } else if (arg === "--verbose" || arg === "-v") {
       options.verbose = true;
+    } else if (arg === "--yes" || arg === "-y") {
+      options.approve = true;
     } else if (arg.startsWith("--tab=") || arg.startsWith("-t=")) {
-      options.tabId = parseInt(arg.split("=")[1], 10);
+      options.tabId = positiveInt(arg.split("=")[1], "--tab");
     } else if ((arg === "--tab" || arg === "-t") && argv[i + 1]) {
-      options.tabId = parseInt(argv[++i], 10);
+      options.tabId = positiveInt(argv[++i], "--tab");
     } else if (arg.startsWith("--run=") || arg.startsWith("-r=")) {
       options.runId = arg.split("=")[1];
     } else if ((arg === "--run" || arg === "-r") && argv[i + 1]) {
       options.runId = argv[++i];
     } else if (arg.startsWith("--timeout=") || arg.startsWith("-T=")) {
-      options.timeoutMs = parseInt(arg.split("=")[1], 10);
+      options.timeoutMs = positiveInt(arg.split("=")[1], "--timeout");
     } else if ((arg === "--timeout" || arg === "-T") && argv[i + 1]) {
-      options.timeoutMs = parseInt(argv[++i], 10);
+      options.timeoutMs = positiveInt(argv[++i], "--timeout");
     } else if (arg.startsWith("--broker=")) {
       options.brokerUrl = arg.split("=")[1];
     } else if (arg === "--broker" && argv[i + 1]) {
@@ -118,35 +128,74 @@ export function buildLocatorFromArg(target: string): {
   return { name: trimmed };
 }
 
+// Query broker for active sessions (including epoch)
+async function querySessions(ws: WebSocket, _url: string): Promise<any[]> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("Session query timeout")), 2000);
+    const handler = (data: WebSocket.RawData) => {
+      try {
+        const msg = JSON.parse(data.toString());
+        if (msg.event === "session.list") {
+          clearTimeout(timeout);
+          ws.off("message", handler);
+          resolve(msg.payload?.sessions || []);
+        }
+      } catch {}
+    };
+    ws.on("message", handler);
+    ws.send(
+      JSON.stringify({
+        v: 1,
+        event: "session.list",
+        event_id: `evt_list_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+      })
+    );
+  });
+}
+
+// Resolves once the broker accepts the token; null when nothing answers (so the caller can start one)
 async function tryConnectBroker(url: string, timeoutMs = 1500): Promise<WebSocket | null> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     let settled = false;
     const ws = new WebSocket(url);
-    const timer = setTimeout(() => {
-      if (!settled) {
-        settled = true;
+    const finish = (result: WebSocket | null, error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      ws.off("message", onMessage);
+      if (!result) {
         try {
           ws.terminate();
         } catch {}
-        resolve(null);
       }
-    }, timeoutMs);
+      if (error) reject(error);
+      else resolve(result);
+    };
+    const timer = setTimeout(() => finish(null), timeoutMs);
+    const onMessage = (data: WebSocket.RawData) => {
+      let msg: any;
+      try {
+        msg = JSON.parse(data.toString());
+      } catch {
+        return;
+      }
+      if (msg.event === "bridge.connected") finish(ws);
+      else if (msg.error === "Unauthorized") {
+        finish(null, new Error("The relay broker rejected the auth token. Check RELAY_AUTH_TOKEN or the auth-token file."));
+      }
+    };
 
     ws.on("open", () => {
-      if (!settled) {
-        settled = true;
-        clearTimeout(timer);
-        resolve(ws);
+      const token = loadAuthToken();
+      if (!token) {
+        finish(null, new Error("No relay auth token: set RELAY_AUTH_TOKEN or run get-relay-token to create one."));
+        return;
       }
+      ws.send(JSON.stringify({ auth_token: token }));
     });
-
-    ws.on("error", () => {
-      if (!settled) {
-        settled = true;
-        clearTimeout(timer);
-        resolve(null);
-      }
-    });
+    ws.on("message", onMessage);
+    ws.on("error", () => finish(null));
   });
 }
 
@@ -181,19 +230,34 @@ export async function ensureBrokerConnected(url = DEFAULT_BROKER_URL): Promise<W
   throw new Error(`Could not connect to OpenCode Relay Broker at ${url}`);
 }
 
-export function tryDismissNativeSaveDialog(filename?: string, action: "save" | "cancel" = "save"): boolean {
-  const res = dismissNativeSaveDialog({ filename, action });
-  return res.dismissed;
+export interface RelayActionHooks {
+  // Chrome opened its Save As dialog for this download ("Ask where to save each file" is on)
+  onSaveDialog?: () => Promise<void> | void;
 }
 
 export async function executeRelayAction(
   action: ActionPayload,
   options: CliOptions,
-  existingWs?: WebSocket
+  existingWs?: WebSocket,
+  hooks: RelayActionHooks = {}
 ): Promise<any> {
   const ws = existingWs || (await ensureBrokerConnected(options.brokerUrl));
   const shouldClose = !existingWs;
   const idempotencyKey = `cli_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+
+  // Fetch current epoch for this run_id to avoid stale epoch rejection
+  let epoch = 0;
+  if (!existingWs) {
+    try {
+      const sessions = await querySessions(ws, options.brokerUrl);
+      const session = sessions.find((s: any) => s.run_id === options.runId);
+      if (session && typeof session.epoch === "number") {
+        epoch = session.epoch;
+      }
+    } catch {
+      // If query fails, fall back to epoch 0 (will work for fresh sessions)
+    }
+  }
 
   const envelope = {
     v: 1,
@@ -201,119 +265,87 @@ export async function executeRelayAction(
     event_id: `evt_${idempotencyKey}`,
     timestamp: new Date().toISOString(),
     run_id: options.runId,
-    epoch: 0,
+    epoch,
     sequence: Date.now() % 1000000,
     tab_id: options.tabId,
     idempotency_key: idempotencyKey,
     action,
+    ...(options.approve ? { payload: { approved: true } } : {}),
   };
 
   return new Promise((resolve, reject) => {
     let settled = false;
-
-    const cleanup = () => {
+    const finish = (error: Error | null, outcome?: any) => {
+      if (settled) return;
       settled = true;
-      clearInterval(retryInterval);
-      clearTimeout(dialogCheckTimer);
       clearTimeout(timer);
       ws.off("message", onMessage);
+      ws.off("close", onClose);
       if (shouldClose) {
         try {
           ws.close();
         } catch {}
       }
+      if (error) reject(error);
+      else resolve(outcome);
     };
 
-    const dialogCheckTimer = setTimeout(() => {
-      if (settled) return;
-      if (
-        action.type === "browser_click" ||
-        action.type === "browser_download" ||
-        /save|download/i.test(action.locator?.name || action.locator?.selector || "")
-      ) {
-        tryDismissNativeSaveDialog();
-      }
-    }, 2000);
-
-    const retryInterval = setInterval(() => {
-      if (settled) return;
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(
-          JSON.stringify({
-            ...envelope,
-            event: "action.started",
-            timestamp: new Date().toISOString(),
-          })
-        );
-      }
-    }, 1500);
-
     const timer = setTimeout(() => {
-      if (settled) return;
-      cleanup();
-      const diagRes = dismissNativeSaveDialog({ action: "save" });
-      if (diagRes.dismissed) {
-        resolve({
-          success: true,
-          verified: true,
-          ...diagRes,
-          outcome_summary: `Confirmed native ${diagRes.windowTitle || "Save As"} dialogue box via OS automation`,
-        });
-        return;
-      }
-      reject(
+      finish(
         new Error(
           `Timed out waiting (${options.timeoutMs}ms) for Chrome extension to execute ${action.type}. Ensure Chrome is open and the OpenCode Chrome Relay extension is loaded/reloaded.`
         )
       );
     }, options.timeoutMs);
 
-    const onMessage = (data: WebSocket.RawData) => {
-      if (settled) return;
-      try {
-        const msg = JSON.parse(data.toString());
-        if (msg.idempotency_key !== idempotencyKey) return;
+    const onClose = () => finish(new Error(`The relay broker closed the connection before ${action.type} finished`));
 
-        if (msg.event === "action.finished") {
-          cleanup();
-          resolve(msg.payload || { success: true });
-        } else if (msg.event === "action.failed") {
-          cleanup();
-          const errMsg = msg.payload?.error || `Action ${action.type} failed`;
-          // If an action on Save/Download/Enter failed or element wasn't found in DOM, check for a native OS dialog
-          if (
-            (action.type === "browser_click" || action.type === "browser_keypress" || action.type === "browser_download") &&
-            (/could not find clickable element|element not found/i.test(errMsg) ||
-              /save|download|speichern|confirm|accept|ok/i.test(action.locator?.name || action.locator?.selector || action.key || ""))
-          ) {
-            const diagRes = dismissNativeSaveDialog({ action: "save" });
-            if (diagRes.dismissed) {
-              resolve({
-                success: true,
-                verified: true,
-                ...diagRes,
-                outcome_summary: `Confirmed native ${diagRes.windowTitle || "Save As"} dialogue box via OS automation`,
-              });
-              return;
-            }
-          }
-          reject(new Error(errMsg));
-        }
+    const onMessage = (data: WebSocket.RawData) => {
+      let msg: any;
+      try {
+        msg = JSON.parse(data.toString());
       } catch {
+        return;
+      }
+      if (msg.idempotency_key !== idempotencyKey) return;
+
+      if (msg.event === "action.finished") {
+        finish(null, msg.payload || { success: true });
+      } else if (msg.event === "action.failed") {
+        finish(new Error(msg.payload?.error || `Action ${action.type} failed`));
+      } else if (msg.event === "download.save_dialog") {
+        void hooks.onSaveDialog?.();
+      } else if (msg.event === "approval.requested") {
+        finish(
+          new Error(
+            `${action.type} needs approval (${msg.payload?.reason || "sensitive action"}), so it was not run. Re-run with --yes to approve it.`
+          )
+        );
       }
     };
 
     ws.on("message", onMessage);
+    ws.on("close", onClose);
     ws.send(JSON.stringify(envelope));
   });
 }
 
 async function runAutonomousAgentFromCli(goal: string, options: CliOptions): Promise<void> {
   const ws = await ensureBrokerConnected(options.brokerUrl);
+  let epoch = 0;
+  try {
+    const sessions = await querySessions(ws, options.brokerUrl);
+    const session = sessions.find((s: any) => s.run_id === options.runId);
+    if (session && typeof session.epoch === "number") {
+      epoch = session.epoch;
+    }
+  } catch {
+    // Fall back to epoch 0
+  }
   const cmd = {
     command: "steer",
     run_id: options.runId,
-    epoch: 0,
+    epoch,
     instruction: goal,
   };
 
@@ -423,7 +455,7 @@ async function printStatusAndJournal(options: CliOptions): Promise<void> {
   console.log(`📂 SQLite Journal: ${SQLITE_PATH}`);
   console.log(`🗂️ Active Broker Sessions (${sessions.length}):`);
   for (const s of sessions) {
-    console.log(`   - ${s.run_id} "${s.name}" [${s.state}] pinned=${s.is_pinned} tab=${s.tab_id ?? "auto"}`);
+    console.log(`   - ${s.run_id} "${s.name}" [${s.state}] epoch=${s.epoch ?? "?"} pinned=${s.is_pinned} tab=${s.tab_id ?? "auto"}`);
   }
   console.log(`📜 Recent Journaled Actions (${dbActions.length}):`);
   for (const a of dbActions) {
@@ -476,8 +508,9 @@ CORE COMMANDS (Deterministic Direct Execution):
   verify <selector|text>         Check if a selector or text exists on the current page
   screenshot [output.png]        Capture a PNG screenshot via CDP and save to disk
   pdf [output.pdf]               Generate and save a PDF document of the page via CDP
-  download <url> [filename]      Download a URL using your logged-in Chrome cookies
-  upload <selector> <files...>   Upload local files into a file input element
+  download <url|target> [dest]   Download a URL (or click a link/button) with your Chrome cookies;
+                                 waits until saved, then moves it to dest (file or folder) if given
+  upload [target] <files...>     Attach local files to a file input or Upload button (no OS dialog)
   save-dialog                    Confirm and dismiss native OS Save As / download dialogue box
 
 INTERACTIVE & AUTOMATION UTILITIES:
@@ -497,6 +530,7 @@ GLOBAL OPTIONS:
   --timeout, -T <ms>             Action timeout in milliseconds (default: 18000)
   --json, -j                     Output structured JSON for programmatic AI agent consumption
   --verbose, -v                  Verbose logging mode
+  --yes, -y                      Approve this command if the relay policy flags it as sensitive
 `);
 }
 
@@ -509,6 +543,20 @@ export function splitCommandLine(cmdLine: string): string[] {
     }
     return m;
   });
+}
+
+// Types a path into Chrome's Save As dialog for a download this CLI started. A file destination gets a
+// temporary name beside it (the move below renames it), so an existing file never triggers the
+// "replace?" prompt and is only replaced once the download has finished.
+async function answerSaveDialog(dest: string | undefined, destIsDir: boolean): Promise<void> {
+  const targetDir = dest ? (destIsDir ? dest : path.dirname(dest)) : path.join(os.homedir(), "Downloads");
+  fs.mkdirSync(targetDir, { recursive: true });
+  const filename = dest && !destIsDir ? `${dest}.part-${Math.random().toString(36).slice(2, 8)}` : undefined;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const res = dismissNativeSaveDialog({ action: "save", filename, targetDir });
+    if (res.dismissed || res.dialogFound) return;
+    await new Promise((r) => setTimeout(r, 750));
+  }
 }
 
 export async function runCli(argv = process.argv.slice(2), existingWs?: WebSocket): Promise<void> {
@@ -628,11 +676,21 @@ export async function runCli(argv = process.argv.slice(2), existingWs?: WebSocke
   if (command === "control") {
     const sub = (positionals[0] || "stop").toLowerCase();
     const ws = await ensureBrokerConnected(options.brokerUrl);
+    let epoch = 0;
+    try {
+      const sessions = await querySessions(ws, options.brokerUrl);
+      const session = sessions.find((s: any) => s.run_id === options.runId);
+      if (session && typeof session.epoch === "number") {
+        epoch = session.epoch;
+      }
+    } catch {
+      // Fall back to epoch 0
+    }
     ws.send(
       JSON.stringify({
         command: sub,
         run_id: options.runId,
-        epoch: 0,
+        epoch,
         instruction: positionals.slice(1).join(" ") || undefined,
       })
     );
@@ -643,8 +701,9 @@ export async function runCli(argv = process.argv.slice(2), existingWs?: WebSocke
   }
 
   if (command === "save-dialog" || command === "confirm-dialog" || command === "accept-dialog") {
-    const filename = positionals[0] || undefined;
     const isCancel = argv.includes("--cancel") || argv.includes("-c");
+    // The flag is not a filename; typing it into the dialog's name box would rename the file
+    const filename = positionals.find((p) => p !== "--cancel" && p !== "-c");
     const res = dismissNativeSaveDialog({ filename, action: isCancel ? "cancel" : "save" });
     if (res.dismissed) {
       if (options.json) {
@@ -1165,26 +1224,74 @@ export async function runCli(argv = process.argv.slice(2), existingWs?: WebSocke
     }
 
     case "download": {
-      const url = positionals[0];
-      if (!url) throw new Error("Usage: browser-relay download <url> [filename]");
-      action = {
-        type: "browser_download",
-        url,
-        download_path: positionals[1],
-        risk: "non_sensitive_mutation",
-        is_irreversible: false,
-      };
-      break;
+      const source = positionals[0];
+      if (!source) throw new Error("Usage: browser-relay download <url|link-or-button> [dest]");
+      // Anything that is not URL-shaped is the link or button to click, e.g. "Export CSV" or "#dl"
+      const isUrl =
+        /^(https?|ftp|data|blob|file):/i.test(source) ||
+        /^\.{0,2}\//.test(source) ||
+        /^[\w-]+(\.[\w-]+)+\/\S*$/.test(source);
+      let dest = positionals[1] ? path.resolve(process.cwd(), positionals[1]) : undefined;
+      const destIsDir =
+        !!dest && (/[\\/]$/.test(positionals[1]) || (fs.existsSync(dest) && fs.statSync(dest).isDirectory()));
+      // Chrome waits for the whole file, so the CLI allows at least 2 minutes for it
+      const downloadTimeout = Math.max(options.timeoutMs, 120000);
+      const outcome = await executeRelayAction(
+        {
+          type: "browser_download",
+          ...(isUrl
+            ? { url: /^[\w-]+(\.[\w-]+)+\//.test(source) ? `https://${source}` : source }
+            : { locator: buildLocatorFromArg(source) }),
+          download_path: dest && !destIsDir ? path.basename(dest) : undefined,
+          timeout_ms: downloadTimeout,
+          risk: "non_sensitive_mutation",
+          is_irreversible: false,
+        },
+        { ...options, timeoutMs: downloadTimeout + 15000 },
+        existingWs,
+        { onSaveDialog: () => answerSaveDialog(dest, destIsDir) }
+      );
+      let savedTo: string | undefined = outcome?.filename;
+      if (dest && savedTo) {
+        if (destIsDir) dest = path.join(dest, path.basename(savedTo));
+        if (path.resolve(savedTo) !== dest) {
+          fs.mkdirSync(path.dirname(dest), { recursive: true });
+          try {
+            fs.renameSync(savedTo, dest);
+          } catch (err: any) {
+            if (err?.code !== "EXDEV") throw err;
+            fs.copyFileSync(savedTo, dest);
+            fs.unlinkSync(savedTo);
+          }
+          savedTo = dest;
+        }
+      }
+      if (options.json) {
+        console.log(JSON.stringify({ ...outcome, filename: savedTo }, null, 2));
+      } else {
+        const size = typeof outcome?.bytes === "number" ? ` (${outcome.bytes} bytes)` : "";
+        console.log(`⬇️ Saved ${savedTo || "(unknown path)"}${size}`);
+      }
+      return;
     }
 
     case "upload": {
-      if (positionals.length < 2) {
-        throw new Error("Usage: browser-relay upload <selector> <file1> [file2...]");
+      // `upload <files...>` uses the page's file input; `upload <target> <files...>` names the input or button
+      const firstIsFile = positionals.length > 0 && fs.existsSync(path.resolve(process.cwd(), positionals[0]));
+      const target = firstIsFile ? undefined : positionals[0];
+      const files = (firstIsFile ? positionals : positionals.slice(1)).map((p) => path.resolve(process.cwd(), p));
+      if (positionals.length === 1 && !firstIsFile) {
+        throw new Error(`File not found: ${path.resolve(process.cwd(), positionals[0])}`);
       }
+      if (files.length === 0) {
+        throw new Error("Usage: browser-relay upload [selector|label] <file1> [file2...]");
+      }
+      const missing = files.filter((f) => !fs.existsSync(f) || !fs.statSync(f).isFile());
+      if (missing.length) throw new Error(`File not found: ${missing.join(", ")}`);
       action = {
         type: "browser_upload",
-        locator: { selector: positionals[0] },
-        file_paths: positionals.slice(1).map((p) => path.resolve(process.cwd(), p)),
+        ...(target ? { locator: buildLocatorFromArg(target) } : {}),
+        file_paths: files,
         risk: "external_effect",
         is_irreversible: false,
       };
@@ -1267,12 +1374,15 @@ export async function runCli(argv = process.argv.slice(2), existingWs?: WebSocke
   }
 }
 
-const isMain =
-  process.argv[1] &&
-  (path.resolve(process.argv[1]) === path.resolve(__filename) ||
-    process.argv[1].endsWith("browser-relay") ||
-    process.argv[1].endsWith("oc-relay") ||
-    process.argv[1].endsWith("cli.js"));
+// realpath resolves the npm bin symlinks; a name check alone would also fire when another
+// tool's own cli.js imports this module through the plugin entry
+const isMain = (() => {
+  try {
+    return !!process.argv[1] && fs.realpathSync(process.argv[1]) === fs.realpathSync(__filename);
+  } catch {
+    return false;
+  }
+})();
 
 if (isMain) {
   runCli().catch((err) => {

@@ -101,10 +101,15 @@ describe("Universal Browser Relay CLI (browser-relay / oc-relay)", () => {
     const address = wss.address();
     const port = typeof address === "object" && address ? address.port : 14098;
     const brokerUrl = `ws://127.0.0.1:${port}`;
+    process.env.RELAY_AUTH_TOKEN = "test-token";
 
     wss.on("connection", (ws) => {
       ws.on("message", (raw) => {
         const env = JSON.parse(raw.toString());
+        if (env.auth_token) {
+          ws.send(JSON.stringify(env.auth_token === "test-token" ? { event: "bridge.connected" } : { error: "Unauthorized" }));
+          return;
+        }
         if (env.event === "browser.action.request") {
           ws.send(
             JSON.stringify({
@@ -147,6 +152,73 @@ describe("Universal Browser Relay CLI (browser-relay / oc-relay)", () => {
 
       expect(outcome.success).toBe(true);
       expect(outcome.eval_result).toEqual({ title: "Google Cloud Console", ready: true });
+    } finally {
+      await new Promise<void>((r) => wss.close(() => r()));
+    }
+  });
+
+  it("refuses an action the broker flags for approval unless --yes was given", async () => {
+    const wss = new WebSocketServer({ port: 0 });
+    const address = wss.address();
+    const port = typeof address === "object" && address ? address.port : 14097;
+    const brokerUrl = `ws://127.0.0.1:${port}`;
+    process.env.RELAY_AUTH_TOKEN = "test-token";
+    const received: any[] = [];
+
+    wss.on("connection", (ws) => {
+      ws.on("message", (raw) => {
+        const env = JSON.parse(raw.toString());
+        if (env.auth_token) {
+          ws.send(JSON.stringify({ event: "bridge.connected" }));
+          return;
+        }
+        if (env.event === "session.list") {
+          ws.send(
+            JSON.stringify({
+              v: 1,
+              event: "session.list",
+              event_id: "evt_list_test",
+              timestamp: new Date().toISOString(),
+              payload: {
+                sessions: [{ run_id: "run_cli_test", name: "Test Session", state: "Ready", epoch: 0, is_pinned: false, tab_id: null }],
+              },
+            })
+          );
+          return;
+        }
+        received.push(env);
+        const approved = env.payload?.approved === true;
+        ws.send(
+          JSON.stringify({
+            event: approved ? "action.finished" : "approval.requested",
+            idempotency_key: env.idempotency_key,
+            payload: approved ? { success: true } : { reason: "Action matches sensitive pattern" },
+          })
+        );
+      });
+    });
+
+    const options = {
+      brokerUrl,
+      runId: "run_cli_test",
+      timeoutMs: 3000,
+      json: true,
+      newTab: false,
+      follow: false,
+      verbose: false,
+      approve: false,
+    };
+    const click = { type: "browser_click", locator: { name: "Delete" }, risk: "external_effect", is_irreversible: false } as any;
+    try {
+      await expect(executeRelayAction(click, options)).rejects.toThrow(/needs approval.*--yes/);
+      await expect(executeRelayAction(click, { ...options, approve: true })).resolves.toEqual({ success: true });
+      // Each attempt sends session.list first, then browser.action.request
+      expect(received.map((e) => e.event)).toEqual([
+        "session.list",
+        "browser.action.request",
+        "session.list",
+        "browser.action.request",
+      ]);
     } finally {
       await new Promise<void>((r) => wss.close(() => r()));
     }

@@ -1,0 +1,86 @@
+{
+  "manifest_version": 3,
+  "name": "OpenCode Firefox Relay",
+  "version": "1.0.0",
+  "description": "Browser-native agent cockpit pairing your personal Firefox profile with OpenCode.",
+  "permissions": [
+    "debugger",
+    "scripting",
+    "storage",
+    "nativeMessaging",
+    "activeTab",
+    "tabs",
+    "downloads",
+    "management",
+    "history",
+    "bookmarks"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "scripts": ["dist/background/index.js"],
+    "type": "module"
+  },
+  "sidebar_action": {
+    "default_panel": "dist/sidepanel/index.html",
+    "default_title": "OpenCode Relay",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "options_ui": {
+    "page": "dist/options.html",
+    "open_in_tab": true
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["dist/content/index.js"],
+      "run_at": "document_end"
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "OpenCode Firefox Relay (Click to open Sidebar)",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "dist/sidepanel/*",
+        "dist/content/*",
+        "icons/*"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Alt+Shift+K",
+        "mac": "Alt+Shift+K"
+      },
+      "description": "Open the Relay sidebar"
+    }
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "opencode-relay@example.com",
+      "strict_min_version": "115.0"
+    }
+  }
+}

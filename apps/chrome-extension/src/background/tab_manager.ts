@@ -27,7 +27,14 @@ export class TabManager {
       await this.configureTabDebugger(tabId);
       return true;
     } catch (err: any) {
-      if (err?.message?.includes("already attached")) {
+      // Chrome says "already attached" both when this extension still holds the tab (e.g. after a
+      // service-worker restart) and when DevTools or another extension does; only the first is usable
+      const ownedByUs =
+        err?.message?.includes("already attached") &&
+        (await chrome.debugger.getTargets()).some(
+          (t) => t.tabId === tabId && t.attached && t.extensionId === chrome.runtime.id
+        );
+      if (ownedByUs) {
         this.attachedTabs.add(tabId);
         this.activeTabId = tabId;
         await this.configureTabDebugger(tabId);
@@ -37,24 +44,12 @@ export class TabManager {
     }
   }
 
+  // Download behavior is deliberately left alone: Browser.setDownloadBehavior is browser-wide, and
+  // "allow" with an empty downloadPath left every download in Chrome stuck at 100% with no file
   private async configureTabDebugger(tabId: number): Promise<void> {
     try {
       await chrome.debugger.sendCommand({ tabId }, "Page.enable");
     } catch {}
-    try {
-      await chrome.debugger.sendCommand({ tabId }, "Browser.setDownloadBehavior", {
-        behavior: "allow",
-        downloadPath: "",
-        eventsEnabled: true,
-      });
-    } catch {
-      try {
-        await chrome.debugger.sendCommand({ tabId }, "Page.setDownloadBehavior", {
-          behavior: "allow",
-          downloadPath: "",
-        });
-      } catch {}
-    }
   }
 
   public async detachTab(tabId: number): Promise<boolean> {

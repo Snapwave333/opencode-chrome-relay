@@ -1,9 +1,24 @@
 import WebSocket from "ws";
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+import os from "node:os";
 import {
   ProtocolEnvelope,
   ActionPayload,
   ControlCommand,
 } from "@opencode/chrome-relay-protocol";
+
+export function loadAuthToken(): string {
+  if (process.env.RELAY_AUTH_TOKEN) {
+    return process.env.RELAY_AUTH_TOKEN;
+  }
+  const configDir =
+    process.platform === "win32"
+      ? path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "opencode-relay")
+      : path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "opencode-relay");
+  const tokenFile = path.join(configDir, "auth-token");
+  return existsSync(tokenFile) ? readFileSync(tokenFile, "utf-8").trim() : "";
+}
 
 export interface RelayClientOptions {
   brokerUrl?: string;
@@ -24,11 +39,12 @@ export class RelayBrokerClient {
 
   constructor(options: RelayClientOptions = {}) {
     this.brokerUrl = options.brokerUrl || process.env.RELAY_BROKER_URL || "ws://127.0.0.1:4098";
-    this.authToken = options.authToken || process.env.RELAY_AUTH_TOKEN || "";
+    this.authToken = options.authToken || loadAuthToken();
     this.runId = options.runId || `run_${Date.now()}`;
   }
 
   public async connect(): Promise<void> {
+    if (!this.authToken) throw new Error("Relay broker authentication token is missing");
     return new Promise((resolve, reject) => {
       try {
         this.ws = new WebSocket(this.brokerUrl);
@@ -128,9 +144,11 @@ export class RelayBrokerClient {
         return reject(new Error("Relay broker WebSocket is not connected"));
       }
 
+      // The extension uses timeout_ms itself, so the broker reply needs a little longer
       const timeout = setTimeout(() => {
+        this.ws?.off("message", responseHandler);
         reject(new Error(`Action timeout waiting for broker response (${action.type})`));
-      }, Math.max(action.timeout_ms || 30000, 10000));
+      }, Math.max((action.timeout_ms || 30000) + 5000, 10000));
 
       const responseHandler = (data: WebSocket.RawData) => {
         try {
@@ -178,6 +196,7 @@ export class RelayBrokerClient {
       }
 
       const timeout = setTimeout(() => {
+        this.ws?.off("message", responseHandler);
         reject(new Error(`Control command timeout (${command})`));
       }, 5000);
 

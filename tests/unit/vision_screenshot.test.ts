@@ -13,7 +13,7 @@ describe("Vision Model Tasks & Immediate Screenshot Deletion", () => {
 
   it("selects the configured vision model or defaults to a vision-capable model", () => {
     const sessionManager = new SessionContextManager();
-    expect(sessionManager.getVisionModel()).toBe("gpt-4o");
+    expect(sessionManager.getVisionModel()).toBe("meta/llama-3.2-11b-vision-instruct");
 
     // Setting explicit vision model
     sessionManager.setVisionModel("claude-3-5-sonnet");

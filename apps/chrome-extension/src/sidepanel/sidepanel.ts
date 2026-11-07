@@ -18,6 +18,9 @@ interface ChatMessage {
   role: "user" | "agent";
   text: string;
   pending?: boolean;
+  failed?: boolean;
+  // An extension op waiting for the user's click (Chrome needs a user gesture for it)
+  confirm?: { requestId: string; op: "uninstall" | "disable" | "enable"; id: string; name: string };
 }
 
 interface SessionData {
@@ -30,6 +33,7 @@ interface SessionData {
   messages: ChatMessage[];
   actions: ActionItem[];
   verifiedCount: number;
+  userHue: number; // avatar colour for this chat, picked at random
 }
 
 const statusBadge = document.getElementById("bridge-status-badge") as HTMLElement;
@@ -64,10 +68,14 @@ const deleteDialogTitle = document.getElementById("delete-dialog-title") as HTML
 
 // Sessions state
 const sessions: Map<string, SessionData> = new Map();
+
+// One of 256 hues, spread over the colour wheel, so each chat gets its own user avatar colour
+const randomUserHue = (): number => Math.round((Math.floor(Math.random() * 256) * 360) / 256);
 let activeRunId = "run_1";
 let sessionCounter = 1;
 
-modelNameLabel.textContent = "NVIDIA NIM";
+const SEND_ICON = getMaterial3Svg("send", 16);
+const STOP_ICON = getMaterial3Svg("stop", 16);
 
 // Initialize with clean primary session (no fake messages or fake action cards)
 sessions.set("run_1", {
@@ -80,27 +88,138 @@ sessions.set("run_1", {
   messages: [],
   actions: [],
   verifiedCount: 0,
+  userHue: randomUserHue(),
 });
 
+// ---------- Mood background ----------
+// Four drifting color fields whose palette follows what the agent is doing.
+// CSS registers --c1..--c4 as <color>, so every change blends smoothly.
+type Mood = "warming" | "idle" | "thinking" | "clicking" | "browsing" | "success" | "error" | "paused";
+
+const MOODS: Record<Mood, { hues: number[]; sat: number; glow: number }> = {
+  warming: { hues: [205, 225, 245, 190], sat: 35, glow: 0.44 },
+  idle: { hues: [220, 255, 190, 280], sat: 55, glow: 0.52 },
+  thinking: { hues: [270, 300, 235, 320], sat: 70, glow: 0.69 },
+  clicking: { hues: [25, 45, 345, 12], sat: 75, glow: 0.69 },
+  browsing: { hues: [180, 160, 200, 140], sat: 65, glow: 0.64 },
+  success: { hues: [140, 160, 120, 175], sat: 60, glow: 0.64 },
+  error: { hues: [0, 350, 18, 330], sat: 70, glow: 0.69 },
+  paused: { hues: [215, 230, 200, 245], sat: 18, glow: 0.39 },
+};
+
+const aura = document.getElementById("aura") as HTMLElement;
+let currentMood: Mood = "warming";
+let moodRevertTimer: number | undefined;
+
+function paintMood(): void {
+  const { hues, sat, glow } = MOODS[currentMood];
+  // Shuffle which corner gets which hue and jitter each one, so no two paints look the same
+  const shuffled = [...hues].sort(() => Math.random() - 0.5);
+  shuffled.forEach((hue, i) => {
+    const h = (hue + (Math.random() * 24 - 12) + 360) % 360;
+    const l = 34 + Math.random() * 14;
+    aura.style.setProperty(`--c${i + 1}`, `hsl(${h.toFixed(0)} ${sat}% ${l.toFixed(0)}%)`);
+  });
+  aura.style.setProperty("--glow", String(glow));
+}
+
+// Icon shown next to "Relay" on the message being worked on, so you can see what it is doing
+const MOOD_ICONS: Record<Mood, { icon: Material3IconName; label: string }> = {
+  warming: { icon: "hourglass_top", label: "Warming up" },
+  idle: { icon: "auto_awesome", label: "Thinking" },
+  thinking: { icon: "auto_awesome", label: "Thinking" },
+  clicking: { icon: "touch_app", label: "Interacting with the page" },
+  browsing: { icon: "language", label: "Browsing" },
+  success: { icon: "check_circle", label: "Step verified" },
+  error: { icon: "error", label: "Something failed" },
+  paused: { icon: "pause_circle", label: "Paused" },
+};
+
+function updatePendingStateIcon(): void {
+  const slot = chatMessagesContainer.querySelector(".msg.pending .msg-state") as HTMLElement | null;
+  if (!slot) return;
+  const { icon, label } = MOOD_ICONS[currentMood];
+  slot.className = `msg-state state-${currentMood}`;
+  slot.innerHTML = getMaterial3Svg(icon, 13);
+  slot.title = label;
+}
+
+function setMood(mood: Mood, revertAfterMs?: number): void {
+  if (moodRevertTimer !== undefined) window.clearTimeout(moodRevertTimer);
+  moodRevertTimer = undefined;
+  if (mood !== currentMood) {
+    currentMood = mood;
+    paintMood();
+  }
+  updatePendingStateIcon();
+  if (revertAfterMs) {
+    moodRevertTimer = window.setTimeout(() => setMood(restingMood()), revertAfterMs);
+  }
+}
+
+// The mood to settle back into after a short flash (success / error)
+function restingMood(): Mood {
+  const current = sessions.get(activeRunId);
+  if (current?.state === "PAUSED" || current?.state === "MANUAL_TAKEOVER") return "paused";
+  return current?.messages.some((m) => m.pending) ? "thinking" : "idle";
+}
+
+function moodForAction(type: string): Mood {
+  return ["browser_click", "browser_type", "browser_upload"].includes(type) ? "clicking" : "browsing";
+}
+
+paintMood();
+// Slowly re-roll the colors within the current mood so the background keeps living
+window.setInterval(paintMood, 9000);
+
 // Initialize button icons with Material 3
-btnNewSession.innerHTML = `${getMaterial3Svg("add", 12)} <span>New</span>`;
+btnNewSession.innerHTML = getMaterial3Svg("add", 16);
 btnPause.innerHTML = `${getMaterial3Svg("pause", 12)} <span>PAUSE</span>`;
 btnStop.innerHTML = `${getMaterial3Svg("stop", 12)} <span>STOP</span>`;
 btnRestart.innerHTML = `${getMaterial3Svg("restart_alt", 12)} <span>RESTART</span>`;
-btnSteer.innerHTML = `${getMaterial3Svg("send", 12)} <span>SEND</span>`;
+btnSteer.innerHTML = SEND_ICON;
 btnTakeOver.innerHTML = `${getMaterial3Svg("touch_app", 12)} <span>TAKE OVER</span>`;
 
 renderTabs();
 updateActiveSessionDisplay();
+steerInput.focus(); // ready to type right after the hotkey opens the panel
 
 // Query bridge status from background
-chrome.runtime.sendMessage({ type: "GET_BRIDGE_STATUS" }, (response) => {
+const refreshBridgeStatus = () => chrome.runtime.sendMessage({ type: "GET_BRIDGE_STATUS" }, (response) => {
   if (response?.connected) {
     statusText.textContent = "Connected";
     statusBadge.className = "status-badge connected";
+    statusBadge.title = "Connected";
   } else {
     statusText.textContent = "Offline";
     statusBadge.className = "status-badge disconnected";
+    statusBadge.title = "Offline";
+  }
+});
+refreshBridgeStatus();
+setInterval(refreshBridgeStatus, 5000);
+
+// Warm up NVIDIA NIM as soon as the panel opens and show whether it's ready
+function setNimStatus(state: "warming" | "ready" | "error", text: string, title = text): void {
+  modelNameLabel.className = `model nim-${state}`;
+  modelNameLabel.title = title === text ? text : `${text} — ${title}`;
+  modelNameLabel.setAttribute("aria-label", text);
+}
+
+function shortModelName(model: string): string {
+  return model.split("/").pop() || model;
+}
+
+setNimStatus("warming", "NIM warming up…");
+chrome.runtime.sendMessage({ type: "WARM_NIM" }, (response) => {
+  if (currentMood === "warming") setMood(response?.state === "ready" ? "idle" : "error", response?.state === "ready" ? undefined : 2500);
+  if (response?.state === "ready") {
+    setNimStatus("ready", `NIM ready · ${shortModelName(response.model)}`, `Answered in ${response.ms} ms`);
+  } else if (response?.state === "no_key") {
+    setNimStatus("error", "NIM: add API key", "Click to open settings");
+    modelNameLabel.onclick = () => chrome.runtime.openOptionsPage();
+  } else {
+    setNimStatus("error", `NIM ${response?.detail || "unreachable"}`);
   }
 });
 
@@ -204,67 +323,167 @@ function renderChatMessages(session: SessionData): void {
   chatMessagesContainer.innerHTML = "";
 
   if (session.messages.length === 0) {
-    const emptyHint = document.createElement("div");
-    emptyHint.className = "chat-empty-state";
-
-    const mark = document.createElement("span");
-    mark.className = "empty-state-mark";
-    mark.innerHTML = getMaterial3Svg("explore", 24);
-
-    const heading = document.createElement("h1");
-    heading.textContent = "Ready when the page is.";
-
-    const copy = document.createElement("p");
-    copy.textContent = "Attach the active tab, then describe the outcome you want. Relay will show each browser action as it happens.";
-
-    const suggestions = document.createElement("div");
-    suggestions.className = "empty-suggestions";
-    for (const suggestion of [
-      "Summarize this page",
-      "Find the primary action",
-      "Check this form for issues",
-    ]) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "suggestion-chip";
-      button.textContent = suggestion;
-      button.onclick = () => {
-        steerInput.value = suggestion;
-        updateComposerState();
-        steerInput.focus();
-      };
-      suggestions.appendChild(button);
-    }
-
-    emptyHint.appendChild(mark);
-    emptyHint.appendChild(heading);
-    emptyHint.appendChild(copy);
-    emptyHint.appendChild(suggestions);
-    chatMessagesContainer.appendChild(emptyHint);
-    return;
+    const hint = document.createElement("div");
+    hint.className = "empty-hint";
+    hint.innerHTML = `<p>Ask anything about this page.</p>`;
+    chatMessagesContainer.appendChild(hint);
   }
 
   for (const msg of session.messages) {
     const entry = document.createElement("div");
-    entry.className =
-      msg.role === "user"
-        ? "timeline-entry user steer"
-        : `timeline-entry agent${msg.pending ? " pending" : ""}`;
+    entry.className = `msg ${msg.role}${msg.pending ? " pending" : ""}`;
+    const avatar = document.createElement("span");
+    avatar.className = "msg-avatar";
+    avatar.innerHTML = getMaterial3Svg(msg.role === "agent" ? "smart_toy" : "person", 15);
+    avatar.setAttribute("aria-hidden", "true");
+    if (msg.role === "user") avatar.style.setProperty("--user-hue", String(session.userHue));
 
-    const roleTag = document.createElement("span");
-    roleTag.className = "role-tag";
-    roleTag.textContent = msg.role === "user" ? "USER · STEER (USER)" : "AGENT";
+    const column = document.createElement("div");
+    column.className = "msg-column";
 
-    const content = document.createElement("p");
-    content.className = "content-text";
-    content.textContent = msg.text;
+    if (msg.role === "agent") {
+      const label = document.createElement("span");
+      label.className = "msg-label";
+      label.textContent = "Relay";
+      const state = document.createElement("span");
+      // Live icon while working; a quiet check / error mark once finished
+      if (msg.pending) {
+        state.className = "msg-state";
+      } else {
+        const done = msg.failed ? MOOD_ICONS.error : MOOD_ICONS.success;
+        state.className = `msg-state ${msg.failed ? "state-error" : "state-done"}`;
+        state.innerHTML = getMaterial3Svg(done.icon, 13);
+        state.title = msg.failed ? done.label : "Done";
+      }
+      label.appendChild(state);
+      column.appendChild(label);
+    }
 
-    entry.appendChild(roleTag);
-    entry.appendChild(content);
+    const body = document.createElement("div");
+    body.className = "msg-body";
+    if (msg.pending && !msg.text) {
+      body.innerHTML = '<span class="typing"><i></i><i></i><i></i></span>';
+    } else {
+      if (msg.role === "agent") {
+        body.innerHTML = renderMarkdownLite(msg.text);
+      } else {
+        body.textContent = msg.text;
+      }
+    }
+    column.appendChild(body);
+    if (msg.confirm) column.appendChild(buildConfirmRow(session, msg));
+
+    entry.appendChild(avatar);
+    entry.appendChild(column);
     chatMessagesContainer.appendChild(entry);
   }
+  updateComposerState();
+  updatePendingStateIcon();
 
   timelineContainer.scrollTop = timelineContainer.scrollHeight;
+}
+
+// Minimal Markdown for agent replies: bold, italics, inline code, links, bullet and
+// numbered lists, paragraphs. Everything is HTML-escaped first, so page text can't inject markup.
+function renderMarkdownLite(text: string): string {
+  const esc = (t: string) =>
+    t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  const inline = (t: string) =>
+    esc(t)
+      .replace(/`([^`]+)`/g, "<code>$1</code>")
+      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>")
+      .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+      .replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+
+  const lines = text.replace(/\r/g, "").split("\n");
+  const out: string[] = [];
+  let list: "ul" | "ol" | null = null;
+  let para: string[] = [];
+  const flushPara = () => {
+    if (para.length) out.push(`<p>${para.map(inline).join("<br>")}</p>`);
+    para = [];
+  };
+  const closeList = () => {
+    if (list) out.push(`</${list}>`);
+    list = null;
+  };
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    const bullet = /^\s*[-*•]\s+(.*)$/.exec(line);
+    const numbered = /^\s*\d+[.)]\s+(.*)$/.exec(line);
+    if (bullet || numbered) {
+      flushPara();
+      const kind = bullet ? "ul" : "ol";
+      if (list !== kind) {
+        closeList();
+        list = kind;
+        out.push(`<${kind}>`);
+      }
+      out.push(`<li>${inline((bullet || numbered)![1])}</li>`);
+    } else if (!line.trim()) {
+      flushPara();
+      closeList();
+    } else if (list && /^\s+/.test(line) && out.length && out[out.length - 1].startsWith("<li>")) {
+      // Indented continuation of the previous list item
+      out[out.length - 1] = out[out.length - 1].replace(/<\/li>$/, `<br>${inline(line.trim())}</li>`);
+    } else {
+      closeList();
+      para.push(line);
+    }
+  }
+  flushPara();
+  closeList();
+  return out.join("");
+}
+
+// Buttons for an extension op. The click is the user gesture chrome.management needs,
+// so the op runs right here and the result goes back to the background run.
+function buildConfirmRow(session: SessionData, msg: ChatMessage): HTMLElement {
+  const { requestId, op, id, name } = msg.confirm!;
+  const row = document.createElement("div");
+  row.className = "confirm-row";
+  const verb = op === "uninstall" ? "Remove" : op === "disable" ? "Disable" : "Enable";
+
+  const finish = (text: string, outcome: string, failed = false) => {
+    msg.confirm = undefined;
+    msg.text = text;
+    msg.failed = failed;
+    renderChatMessages(session);
+    chrome.runtime.sendMessage({ type: "EXTENSION_CONFIRM_RESULT", requestId, outcome });
+  };
+
+  const yes = document.createElement("button");
+  yes.type = "button";
+  yes.className = `confirm-btn primary${op === "uninstall" ? " danger" : ""}`;
+  yes.innerHTML = `${getMaterial3Svg(op === "uninstall" ? "cancel" : op === "disable" ? "pause_circle" : "check_circle", 14)} <span></span>`;
+  yes.querySelector("span")!.textContent = `${verb} ${name}`;
+  yes.onclick = async () => {
+    yes.disabled = no.disabled = true;
+    try {
+      if (op === "uninstall") {
+        await chrome.management.uninstall(id, { showConfirmDialog: false });
+        const stillThere = (await chrome.management.getAll()).some((e) => e.id === id);
+        if (stillThere) return finish(`"${name}" is still installed.`, `CANCELLED: "${name}" was not removed`, true);
+        finish(`Removed "${name}".`, `SUCCESS: "${name}" was uninstalled`);
+      } else {
+        await chrome.management.setEnabled(id, op === "enable");
+        finish(`${verb}d "${name}".`, `SUCCESS: "${name}" is now ${op}d`);
+      }
+    } catch (err: any) {
+      finish(`Couldn't ${op} "${name}": ${err?.message || err}`, `FAILED: ${err?.message || err}`, true);
+    }
+  };
+
+  const no = document.createElement("button");
+  no.type = "button";
+  no.className = "confirm-btn";
+  no.textContent = "Keep";
+  no.onclick = () => finish(`Kept "${name}".`, `CANCELLED: you chose to keep "${name}"`);
+
+  row.appendChild(yes);
+  row.appendChild(no);
+  return row;
 }
 
 function renderActivityFeed(session: SessionData): void {
@@ -404,6 +623,7 @@ function createNewSession(name?: string): void {
     messages: [],
     actions: [],
     verifiedCount: 0,
+    userHue: randomUserHue(),
   };
 
   sessions.set(runId, newSession);
@@ -483,7 +703,12 @@ function togglePin(runId: string): void {
 }
 
 // Event Listeners
-btnNewSession.addEventListener("click", () => createNewSession());
+// "New chat" replaces the current conversation (session tabs are hidden)
+btnNewSession.addEventListener("click", () => {
+  const previous = sessions.get(activeRunId);
+  createNewSession();
+  if (previous && !previous.isPinned) deleteSession(previous.runId, true);
+});
 btnTogglePin.addEventListener("click", () => togglePin(activeRunId));
 btnDeleteSession.addEventListener("click", () => requestSessionDelete(activeRunId));
 sessionPinStatus.addEventListener("click", () => togglePin(activeRunId));
@@ -565,11 +790,12 @@ function submitChatMessage(): void {
   current.messages.push({
     id: `msg_a_${Date.now()}`,
     role: "agent",
-    text: "Thinking...",
+    text: "",
     pending: true,
   });
 
   renderChatMessages(current);
+  setMood("thinking");
 
   chrome.runtime.sendMessage({
     type: "DISPATCH_CONTROL",
@@ -582,7 +808,20 @@ function submitChatMessage(): void {
   });
 }
 
-btnSteer.addEventListener("click", () => submitChatMessage());
+btnSteer.addEventListener("click", () => {
+  const current = sessions.get(activeRunId);
+  const pending = current?.messages.find((m) => m.pending);
+  if (current && pending) {
+    dispatchControl("stop");
+    pending.pending = false;
+    pending.failed = true;
+    pending.text = "Stopped.";
+    renderChatMessages(current);
+    setMood("idle");
+    return;
+  }
+  submitChatMessage();
+});
 steerInput.addEventListener("input", () => updateComposerState());
 steerInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) {
@@ -605,7 +844,12 @@ btnTakeOver.addEventListener("click", () => {
 
 function updateComposerState(): void {
   const length = steerInput.value.length;
-  btnSteer.disabled = steerInput.value.trim().length === 0;
+  const isWaiting = !!sessions.get(activeRunId)?.messages.some((m) => m.pending);
+  btnSteer.innerHTML = isWaiting ? STOP_ICON : SEND_ICON;
+  btnSteer.setAttribute("aria-label", isWaiting ? "Stop" : "Send");
+  btnSteer.title = isWaiting ? "Stop" : "Send";
+  btnSteer.classList.toggle("is-stop", isWaiting);
+  btnSteer.disabled = !isWaiting && steerInput.value.trim().length === 0;
   composerCount.textContent = `${length} / 4000`;
   steerInput.style.height = "auto";
   steerInput.style.height = `${Math.min(steerInput.scrollHeight, 110)}px`;
@@ -649,7 +893,9 @@ function dispatchControl(command: string, instruction?: string): void {
 }
 
 // Listen for broadcast events from background
-chrome.runtime.onMessage.addListener((msg) => {
+chrome.runtime.onMessage.addListener((msg, sender) => {
+  // Content scripts on every page can message the extension too; only the background drives the panel
+  if (sender.id !== chrome.runtime.id || sender.tab) return;
   const targetRunId = msg.run_id || activeRunId;
   const session = sessions.get(targetRunId);
   if (!session) return;
@@ -658,33 +904,34 @@ chrome.runtime.onMessage.addListener((msg) => {
     const replyText = String(msg.payload.text || "");
     const model = String(msg.payload.model || "");
     if (model && model !== "local" && model !== "error") {
-      const shortModel = model.split("/").pop() || model;
-      modelNameLabel.textContent = `NVIDIA NIM · ${shortModel}`;
+      setNimStatus("ready", `NIM ready · ${shortModelName(model)}`);
     }
 
+    // Each step's text replaces the working reply; it stays "working" until run.completed
     const pendingIdx = session.messages.findIndex((m) => m.pending);
+    const last = session.messages[session.messages.length - 1];
+    const confirm = msg.payload.confirm;
     if (pendingIdx !== -1) {
-      session.messages[pendingIdx] = {
-        id: session.messages[pendingIdx].id,
-        role: "agent",
-        text: replyText,
-        pending: false,
-      };
-    } else if (
-      session.messages.length > 0 &&
-      session.messages[session.messages.length - 1].role === "agent"
-    ) {
-      session.messages[session.messages.length - 1].text = replyText;
+      session.messages[pendingIdx].text = replyText;
+      session.messages[pendingIdx].failed = model === "error";
+      session.messages[pendingIdx].confirm = confirm;
+    } else if (last && last.role === "agent") {
+      last.text = replyText;
+      last.failed = model === "error";
+      last.confirm = confirm;
     } else {
-      session.messages.push({
-        id: `msg_a_${Date.now()}`,
-        role: "agent",
-        text: replyText,
-      });
+      session.messages.push({ id: `msg_a_${Date.now()}`, role: "agent", text: replyText, pending: true, confirm });
     }
 
     if (targetRunId === activeRunId) {
       renderChatMessages(session);
+      setMood(model === "error" ? "error" : restingMood(), model === "error" ? 2500 : undefined);
+    }
+  } else if (msg.event === "run.completed") {
+    for (const m of session.messages) m.pending = false;
+    if (targetRunId === activeRunId) {
+      renderChatMessages(session);
+      setMood(restingMood());
     }
   } else if (msg.event === "run.state_changed" && msg.payload) {
     session.state = msg.payload.new_state;
@@ -692,6 +939,7 @@ chrome.runtime.onMessage.addListener((msg) => {
     if (targetRunId === activeRunId) {
       liveActionText.textContent = `${session.state}`;
       updateExecutionControls(session);
+      setMood(restingMood());
     }
   } else if (msg.event === "action.started" && msg.action) {
     const actionId = msg.idempotency_key || `act_${Date.now()}`;
@@ -707,6 +955,7 @@ chrome.runtime.onMessage.addListener((msg) => {
     if (targetRunId === activeRunId) {
       liveDot.style.color = "var(--cyan-accent)";
       liveActionText.textContent = `Running: ${newAction.target}`;
+      setMood(moodForAction(newAction.type));
       renderActivityFeed(session);
     }
   } else if (msg.event === "action.finished") {
@@ -729,6 +978,7 @@ chrome.runtime.onMessage.addListener((msg) => {
       liveDot.style.color = "var(--green-ok)";
       sessionActionStats.innerHTML = `${getMaterial3Svg("bolt", 12)} <span>${session.verifiedCount} verified</span>`;
       liveActionText.textContent = "Verified";
+      setMood("success", 1400);
       renderActivityFeed(session);
     }
   } else if (msg.event === "action.failed") {
@@ -743,6 +993,7 @@ chrome.runtime.onMessage.addListener((msg) => {
     if (targetRunId === activeRunId) {
       liveDot.style.color = "var(--red-error)";
       liveActionText.textContent = `Failed: ${msg.payload?.error || "Error"}`;
+      setMood("error", 2500);
       renderActivityFeed(session);
     }
   }

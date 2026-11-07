@@ -29,13 +29,26 @@ pub fn read_native_message<R: Read>(mut reader: R) -> io::Result<Option<String>>
     Ok(Some(s))
 }
 
+pub const MAX_TO_CHROME_BYTES: usize = 1024 * 1024;
+
 pub fn write_native_message<W: Write>(mut writer: W, msg: &str) -> io::Result<()> {
     let bytes = msg.as_bytes();
+    // Chrome disconnects a host that sends it a message over 1 MB
+    if bytes.len() > MAX_TO_CHROME_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Native message of {} bytes exceeds Chrome's 1 MB limit", bytes.len()),
+        ));
+    }
+    // One write_all for header and body: two threads write to stdout, and a split write lets
+    // another frame land between a length and its body
+    let mut frame = Vec::with_capacity(4 + bytes.len());
     let mut len_buf = [0u8; 4];
     LittleEndian::write_u32(&mut len_buf, bytes.len() as u32);
+    frame.extend_from_slice(&len_buf);
+    frame.extend_from_slice(bytes);
 
-    writer.write_all(&len_buf)?;
-    writer.write_all(bytes)?;
+    writer.write_all(&frame)?;
     writer.flush()?;
     Ok(())
 }

@@ -1,5 +1,6 @@
 use crate::protocol::{ActionPayload, AuthorizationMode, RiskLevel};
 
+#[derive(Debug)]
 pub struct PolicyResult {
     pub requires_approval: bool,
     pub is_forbidden: bool,
@@ -7,12 +8,20 @@ pub struct PolicyResult {
 }
 
 pub fn is_forbidden_url(url: &str) -> bool {
-    let lower = url.to_lowercase();
-    lower.starts_with("chrome://")
-        || lower.starts_with("chrome-extension://")
-        || lower.starts_with("edge://")
-        || lower.starts_with("about:")
-        || lower.starts_with("devtools://")
+    // Chrome ignores leading whitespace, so " chrome://settings" must not slip through
+    let lower = url.trim().to_lowercase();
+    [
+        "chrome://",
+        "chrome-extension://",
+        "chrome-untrusted://",
+        "edge://",
+        "about:",
+        "devtools://",
+        "view-source:",
+        "javascript:",
+    ]
+    .iter()
+    .any(|prefix| lower.starts_with(prefix))
 }
 
 pub fn is_sensitive_pattern(text: &str) -> bool {
@@ -38,7 +47,10 @@ pub fn is_sensitive_pattern(text: &str) -> bool {
         "token",
         "credential",
     ];
-    keywords.iter().any(|&kw| lower.contains(kw))
+    // Match at word starts so "display", "border" and "repost" don't read as "pay", "order", "post"
+    lower
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .any(|word| keywords.iter().any(|&kw| word.starts_with(kw)))
 }
 
 pub fn evaluate_action(
@@ -85,9 +97,15 @@ pub fn evaluate_action(
         };
     }
 
+    // For these actions `text` is JS source or a search string, not something the user would click or
+    // type, so a variable named "deleted" must not make them look sensitive
+    let text_is_label = !matches!(
+        action.action_type.as_str(),
+        "browser_eval" | "browser_wait" | "browser_verify" | "browser_extract"
+    );
     let candidate_text = format!(
         "{} {} {}",
-        action.text.as_deref().unwrap_or(""),
+        if text_is_label { action.text.as_deref().unwrap_or("") } else { "" },
         action
             .locator
             .as_ref()

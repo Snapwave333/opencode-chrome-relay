@@ -20,7 +20,7 @@ export class NvidiaNimClient {
   private cooldowns: Map<string, number> = new Map(); // model -> cooldown timestamp (ms)
 
   constructor(apiKey?: string, baseUrl?: string) {
-    this.apiKey = apiKey || process.env.NVIDIA_API_KEY || "nvapi-free-tier-mock";
+    this.apiKey = apiKey || process.env.NVIDIA_API_KEY || "";
     this.baseUrl = baseUrl || process.env.NVIDIA_BASE_URL || "https://integrate.api.nvidia.com/v1";
   }
 
@@ -107,6 +107,10 @@ export class NvidiaNimClient {
     if (process.env.NODE_ENV === "test" || this.apiKey.startsWith("nvapi-free-tier-mock")) {
       return `[NVIDIA NIM ${model}] Generated response for ${messages.length} messages.`;
     }
+    // Without a key every request fails; say so instead of returning a made-up answer
+    if (!this.apiKey) {
+      throw new Error("NVIDIA_API_KEY is not set, so the NVIDIA NIM model can't be called");
+    }
 
     const response = await fetch(`${this.baseUrl}/chat/completions`, {
       method: "POST",
@@ -120,6 +124,8 @@ export class NvidiaNimClient {
         temperature: options.temperature ?? 0.2,
         max_tokens: options.max_tokens ?? 1024,
       }),
+      // A stalled request would otherwise hang the calling tool forever
+      signal: AbortSignal.timeout(60000),
     });
 
     if (!response.ok) {

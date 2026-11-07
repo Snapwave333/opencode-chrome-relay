@@ -1,9 +1,10 @@
 {
-  "path": "C:\\Users\\chrom\\Desktop\\opencoderealy\\target\\debug\\relay-native-host.exe",
+  "path": "C:\\Users\\chrom\\.relay\\opencoderealy\\target\\debug\\relay-native-host.exe",
   "description": "OpenCode Chrome Relay Native Messaging Host",
   "name": "com.opencode.chrome_relay",
   "allowed_origins": [
-    "chrome-extension://pogdiiiklddnjkdmnhkdbcelighmkjgb/"
+    "chrome-extension://pogdiiiklddnjkdmnhkdbcelighmkjgb/",
+    "chrome-extension://eipelidjlokkmllpjhboafhpoinapabd/"
   ],
   "type": "stdio"
 }

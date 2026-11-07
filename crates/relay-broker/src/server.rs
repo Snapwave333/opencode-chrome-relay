@@ -3,8 +3,15 @@ use crate::scheduler::Scheduler;
 use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
 use tokio::net::{TcpListener, TcpStream};
+use std::time::Duration;
 use tokio::sync::broadcast;
-use tokio_tungstenite::accept_async;
+use tokio_tungstenite::accept_async_with_config;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+use tokio_tungstenite::tungstenite::Message;
+
+// Screenshots and PDFs arrive base64-encoded inside action.finished, so this stays generous
+const MAX_MESSAGE_BYTES: usize = 32 << 20;
+const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct BrokerServer {
     addr: SocketAddr,
@@ -65,19 +72,39 @@ async fn handle_connection(
     event_tx: broadcast::Sender<String>,
     event_rx: &mut broadcast::Receiver<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let ws_stream = accept_async(stream).await?;
+    // Any local web page can open this socket, so cap message size before anything is parsed
+    let config = WebSocketConfig {
+        max_message_size: Some(MAX_MESSAGE_BYTES),
+        max_frame_size: Some(MAX_MESSAGE_BYTES),
+        ..Default::default()
+    };
+    let ws_stream = accept_async_with_config(stream, Some(config)).await?;
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
 
-    let mut authenticated = auth_token.is_empty();
+    // ALWAYS require authentication - no bypass
+    let mut authenticated = false;
+    let auth_deadline = tokio::time::sleep(AUTH_TIMEOUT);
+    tokio::pin!(auth_deadline);
 
     loop {
         tokio::select! {
+            _ = &mut auth_deadline, if !authenticated => {
+                return Ok(());
+            }
             msg_res = ws_receiver.next() => {
                 match msg_res {
                     Some(Ok(msg)) => {
                         if msg.is_text() {
                             let text = msg.to_text()?;
-                            let parsed: serde_json::Value = serde_json::from_str(text)?;
+                            let parsed: serde_json::Value = match serde_json::from_str(text) {
+                                Ok(v) => v,
+                                Err(e) if authenticated => {
+                                    let err_resp = serde_json::json!({ "error": format!("Invalid JSON: {}", e) });
+                                    ws_sender.send(Message::Text(err_resp.to_string())).await?;
+                                    continue;
+                                }
+                                Err(e) => return Err(Box::new(e)),
+                            };
 
                             if !authenticated {
                                 if let Some(token) = parsed.get("auth_token").and_then(|t| t.as_str()) {
@@ -102,13 +129,15 @@ async fn handle_connection(
                             if let Ok(ctrl) = serde_json::from_value::<ControlCommand>(parsed.clone()) {
                                 match scheduler.handle_control(&ctrl) {
                                     Ok(new_state) => {
+                                        // Stop and restart advance the epoch; clients adopt the one reported here
+                                        let epoch = scheduler.get_or_create_session(&ctrl.run_id).epoch;
                                         let resp = serde_json::json!({
                                             "v": 1,
                                             "event": "run.state_changed",
                                             "event_id": uuid::Uuid::new_v4().to_string(),
                                             "timestamp": chrono::Utc::now().to_rfc3339(),
                                             "run_id": ctrl.run_id,
-                                            "epoch": ctrl.epoch,
+                                            "epoch": epoch,
                                             "payload": {
                                                 "new_state": new_state,
                                                 "command": ctrl.command,
@@ -167,8 +196,31 @@ async fn handle_connection(
                                         }
                                     }
                                 } else if envelope.event == "action.started" {
-                                    let _ = scheduler.submit_action(&envelope);
-                                    let _ = event_tx.send(text.to_string());
+                                    // The extension reports actions it runs itself (side-panel agent) for the
+                                    // journal. Anyone else must use browser.action.request, which applies the
+                                    // approval policy; rebroadcasting their action.started would let the
+                                    // extension execute it without that check.
+                                    let from_extension = envelope
+                                        .payload
+                                        .as_ref()
+                                        .and_then(|p| p.get("from_extension"))
+                                        .and_then(|b| b.as_bool())
+                                        .unwrap_or(false);
+                                    if from_extension {
+                                        let _ = scheduler.submit_action(&envelope);
+                                        let _ = event_tx.send(text.to_string());
+                                    } else {
+                                        let err_resp = serde_json::json!({
+                                            "v": 1,
+                                            "event": "action.failed",
+                                            "event_id": uuid::Uuid::new_v4().to_string(),
+                                            "timestamp": chrono::Utc::now().to_rfc3339(),
+                                            "run_id": envelope.run_id,
+                                            "idempotency_key": envelope.idempotency_key,
+                                            "payload": { "error": "Send browser.action.request; action.started is reserved for the extension" }
+                                        });
+                                        ws_sender.send(Message::Text(err_resp.to_string())).await?;
+                                    }
                                 } else if envelope.event == "action.finished" || envelope.event == "action.failed" {
                                     if let Some(idem) = envelope.idempotency_key.as_deref() {
                                         let is_ok = envelope.event == "action.finished";
@@ -245,15 +297,16 @@ async fn handle_connection(
                                     }
                                 } else if envelope.event == "session.list" {
                                     let sessions = scheduler.list_sessions();
-                                    let session_items: Vec<_> = sessions.iter().map(|s| {
-                                        serde_json::json!({
-                                            "run_id": s.run_id,
-                                            "name": s.name,
-                                            "is_pinned": s.is_pinned,
-                                            "state": s.state,
-                                            "tab_id": s.tab_id
-                                        })
-                                    }).collect();
+let session_items: Vec<_> = sessions.iter().map(|s| {
+                                    serde_json::json!({
+                                        "run_id": s.run_id,
+                                        "name": s.name,
+                                        "is_pinned": s.is_pinned,
+                                        "state": s.state,
+                                        "tab_id": s.tab_id,
+                                        "epoch": s.epoch
+                                    })
+                                }).collect();
                                     let resp = serde_json::json!({
                                         "v": 1,
                                         "event": "session.list",
@@ -272,7 +325,8 @@ async fn handle_connection(
                     None => break,
                 }
             }
-            ev = event_rx.recv() => {
+            // Broadcasts carry page content and screenshots: only authenticated clients see them
+            ev = event_rx.recv(), if authenticated => {
                 if let Ok(ev_str) = ev {
                     ws_sender.send(tokio_tungstenite::tungstenite::Message::Text(ev_str)).await?;
                 }

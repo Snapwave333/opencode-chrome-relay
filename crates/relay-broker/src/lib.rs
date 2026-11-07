@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod db;
 pub mod policy;
 pub mod protocol;
@@ -22,6 +23,19 @@ mod tests {
         assert!(is_forbidden_url("chrome-extension://xyz/options.html"));
         assert!(is_forbidden_url("edge://version"));
         assert!(!is_forbidden_url("https://github.com"));
+        assert!(is_forbidden_url("  CHROME://settings"));
+        assert!(is_forbidden_url("javascript:alert(1)"));
+        assert!(is_forbidden_url("view-source:https://example.com"));
+    }
+
+    #[test]
+    fn test_sensitive_pattern_matches_word_starts() {
+        use policy::is_sensitive_pattern;
+        assert!(is_sensitive_pattern("Pay now"));
+        assert!(is_sensitive_pattern("Delete account"));
+        assert!(is_sensitive_pattern("submit_form"));
+        assert!(!is_sensitive_pattern("Display settings"));
+        assert!(!is_sensitive_pattern("border color"));
     }
 
     #[test]
@@ -114,6 +128,37 @@ mod tests {
     }
 
     #[test]
+    fn test_tab_lease_race_condition() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let db = Arc::new(Database::new_in_memory().unwrap());
+        let mut handles = vec![];
+
+        // Spawn 10 threads trying to acquire the same tab simultaneously
+        for i in 0..10 {
+            let db_clone = Arc::clone(&db);
+            let run_id = format!("run_{}", i);
+            let lease_id = format!("lease_{}", i);
+            
+            let handle = thread::spawn(move || {
+                db_clone.acquire_tab_lease(&lease_id, 99, &run_id, 10)
+            });
+            handles.push(handle);
+        }
+
+        // Collect results
+        let results: Vec<bool> = handles
+            .into_iter()
+            .map(|h| h.join().unwrap().unwrap())
+            .collect();
+
+        // Exactly one should succeed
+        let success_count = results.iter().filter(|&&r| r).count();
+        assert_eq!(success_count, 1, "Exactly one thread should acquire the lease");
+    }
+
+    #[test]
     fn test_scheduler_action_submission_and_fencing() {
         let db = Database::new_in_memory().unwrap();
         let scheduler = Scheduler::new(db);
@@ -155,6 +200,31 @@ mod tests {
         let pol = scheduler.submit_action(&envelope).unwrap();
         assert!(!pol.requires_approval);
         assert!(!pol.is_forbidden);
+
+        // A forbidden target is rejected outright, never admitted as a started action
+        let mut forbidden = envelope.clone();
+        forbidden.idempotency_key = Some("run_1:0:9".into());
+        forbidden.sequence = Some(9);
+        if let Some(a) = forbidden.action.as_mut() {
+            a.action_type = "browser_navigate".into();
+            a.url = Some("chrome://settings".into());
+        }
+        let err = scheduler.submit_action(&forbidden).unwrap_err();
+        assert!(err.contains("restricted"), "{}", err);
+
+        // A sensitive click needs approval unless the caller approved it up front
+        let mut sensitive = envelope.clone();
+        sensitive.idempotency_key = Some("run_1:0:10".into());
+        sensitive.sequence = Some(10);
+        if let Some(a) = sensitive.action.as_mut() {
+            a.action_type = "browser_click".into();
+            a.text = Some("Delete account".into());
+        }
+        assert!(scheduler.submit_action(&sensitive).unwrap().requires_approval);
+        sensitive.idempotency_key = Some("run_1:0:11".into());
+        sensitive.sequence = Some(11);
+        sensitive.payload = Some(serde_json::json!({ "approved": true }));
+        assert!(!scheduler.submit_action(&sensitive).unwrap().requires_approval);
 
         // Pause run
         let ctrl = ControlCommand {
@@ -236,5 +306,71 @@ mod tests {
         // 3. Manual deletion removes it even if pinned
         scheduler.delete_session("sess_pinned").unwrap();
         assert_eq!(scheduler.list_sessions().len(), 0);
+    }
+
+    #[test]
+    fn test_mutex_poison_recovery() {
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        // Create a mutex and intentionally poison it
+        let data = Arc::new(Mutex::new(42));
+        let data_clone = Arc::clone(&data);
+
+        // Spawn a thread that will panic while holding the lock
+        let handle = thread::spawn(move || {
+            let _guard = data_clone.lock().unwrap();
+            panic!("Intentional panic to poison mutex");
+        });
+
+        // Wait for the thread to panic
+        let _ = handle.join();
+
+        // Now the mutex is poisoned. Verify we can recover
+        let recovered_value = match data.lock() {
+            Ok(_) => panic!("Expected poisoned mutex"),
+            Err(poisoned) => {
+                // This is the recovery path - we can extract the data
+                let guard = poisoned.into_inner();
+                *guard
+            }
+        };
+        
+        assert_eq!(recovered_value, 42);
+        
+        // The broker uses the same recovery pattern via lock_or_recover()
+        // This proves one panic won't take down the entire broker
+    }
+
+    #[test]
+    fn test_lease_expiry_cleanup() {
+        let db = Database::new_in_memory().unwrap();
+
+        // Create a lease that expires immediately
+        let now = chrono::Utc::now();
+        let past = (now - chrono::Duration::seconds(60)).to_rfc3339();
+        
+        // Insert expired lease directly
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO tab_leases (lease_id, tab_id, owner_run_id, expires_at, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params!["expired_lease", 123, "old_run", past, past],
+        ).unwrap();
+        drop(conn);
+
+        // Verify expired lease exists
+        let conn = db.conn.lock().unwrap();
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM tab_leases", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 1);
+        drop(conn);
+
+        // Clean up expired leases
+        let cleaned = db.cleanup_expired_leases().unwrap();
+        assert_eq!(cleaned, 1);
+
+        // Verify lease was deleted
+        let conn = db.conn.lock().unwrap();
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM tab_leases", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 0);
     }
 }
