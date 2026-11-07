@@ -29,9 +29,13 @@ scratch/
 
 # Security: Extension private key must not be committed
 apps/chrome-extension/extension_key.pem
+*.pem
 
 # Security: Auth tokens and API keys
 .env
 *.key
 *-token
 auth-token
+
+# Not part of the relay
+apps/chrome-extension-nova/
