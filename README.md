@@ -3,21 +3,21 @@
 <div align="center">
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)](LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-1.75+-black.svg?style=for-the-badge&logo=rust)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-1.85+-black.svg?style=for-the-badge&logo=rust)](https://www.rust-lang.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.5+-blue.svg?style=for-the-badge&logo=typescript)](https://www.typescriptlang.org/)
 [![Chrome MV3](https://img.shields.io/badge/Chrome-Manifest_V3-green.svg?style=for-the-badge&logo=googlechrome)](https://developer.chrome.com/docs/extensions/mv3/intro/)
 [![Model Context Protocol](https://img.shields.io/badge/MCP-Compatible-purple.svg?style=for-the-badge)](https://modelcontextprotocol.io/)
 [![Platform](https://img.shields.io/badge/Platform-Windows_11-0078D4.svg?style=for-the-badge&logo=windows)](installer/windows/)
 
 <p align="center">
-  <strong>Browser-native agent cockpit and provider-neutral gateway for controlling your personal Chrome profile with AI agents.</strong>
+  <strong>Let AI agents drive the Chrome you already use: your profile, your tabs, your logins.</strong>
 </p>
 
 <p align="center">
-  <em>No secondary Playwright browsers. No throwaway sandboxed profiles. No duplicate API keys. No bot-detection lockouts.</em>
+  <em>No second Playwright browser. No throwaway profile. No model keys inside the browser.</em>
 </p>
 
-[Key Features](#-key-features) • [Architecture](#-architecture) • [Quickstart](#-quickstart) • [Agent Integration](#-agent-integration) • [Tools Reference](#-19-browser-tools) • [Security](#-security--privacy)
+[Why](#-why-opencode-chrome-relay) • [Architecture](#%EF%B8%8F-architecture) • [Quickstart](#-quickstart) • [Agent Integration](#-agent-integration) • [Tools](#%EF%B8%8F-browser-tools) • [Security](#%EF%B8%8F-security--privacy) • [Troubleshooting](#-troubleshooting)
 
 ---
 
@@ -25,262 +25,276 @@
 
 ## 💡 Why OpenCode Chrome Relay?
 
-Traditional browser automation frameworks (Puppeteer, Playwright, Selenium) launch isolated, freshly minted browser instances. While great for integration testing, they fail for real-world personal assistant workflows:
+Puppeteer, Playwright and Selenium start a fresh, logged-out browser. That suits test suites, not a personal assistant:
 
-* ❌ **Login Lockout:** Websites immediately detect headless automation, forcing CAPTCHAs and 2FA challenges.
-* ❌ **Credential Exposure:** API keys and credentials are leaked into the browser sandbox or web scripts.
-* ❌ **Lack of Control:** If an agent gets stuck in a loop, you can only terminate the process abruptly.
-* ❌ **Blind Execution:** You cannot see which element the agent is examining or interacting with until it is too late.
+* ❌ **Logged out:** every site needs a fresh login, and automated browsers draw more CAPTCHAs and 2FA prompts.
+* ❌ **Credential handling:** cookies and keys have to be exported or passed into the automation context.
+* ❌ **No brakes:** if an agent loops, the only stop is killing the process.
+* ❌ **Blind runs:** you can't see what the agent is looking at until it acts.
 
-**OpenCode Chrome Relay changes the paradigm:**
+The relay works the other way round:
 
-| Capability | Traditional Automation (Playwright / Puppeteer) | OpenCode Chrome Relay |
+| | Playwright / Puppeteer | OpenCode Chrome Relay |
 | :--- | :--- | :--- |
-| **Browser Identity** | Separate disposable profile; logged-out | **Your actual, active, logged-in Chrome profile** |
-| **Authentication & Cookies** | Requires exporting session cookies or logging in | **Seamless reuse of active sessions, passkeys & tokens** |
-| **Credential Security** | Keys embedded or passed to browser context | **Zero LLM key leakage; model keys isolated in agent** |
-| **Execution Control** | Abrupt process SIGKILL | **Monotonic epoch cancellation: PAUSE, STOP, RESTART, STEER** |
-| **Visual Feedback** | Invisible headless runs or clunky debug windows | **Shadow DOM in-page HUD: soft outlines, ripples & captions** |
-| **Auditability** | Ephemeral console logs | **Durable SQLite journal with lease locking & idempotency** |
-| **Agent Interoperability** | Vendor-locked proprietary drivers | **Standard MCP Server, JSONL stdio, & OpenCode Plugin** |
+| **Browser** | Separate, disposable, logged out | **Your real Chrome profile, already logged in** |
+| **Sessions & cookies** | Export them or log in again | **Reused in place: cookies, passkeys, SSO** |
+| **Model keys** | Often passed into the browser context | **Stay in the agent; the extension never sees them** |
+| **Stopping a run** | Kill the process | **PAUSE, STOP, RESTART, TAKE OVER, backed by epoch fencing** |
+| **Visibility** | Headless, or a debug window | **In-page overlay: outlines, click ripples, typing captions** |
+| **Audit trail** | Console logs | **SQLite journal with tab leases and idempotency keys** |
+| **Agent support** | Library API | **MCP server, JSONL stdio, CLI, OpenCode plugin** |
 
 ---
 
 ## ⚡ Key Features
 
-* 🔐 **Personal Profile Binding**  
-  Directly operates tabs within your authenticated browser window. Works seamlessly with Gmail, GitHub, AWS Console, Figma, internal enterprise portals, and social media platforms without triggering bot detections.
-
-* 🛡️ **Model Key Isolation**  
-  Reuses your configured OpenCode / Anthropic / OpenAI / local model credentials within your agent's runtime. The Chrome extension and browser pages *never* see, receive, or store your provider keys.
-
-* 🛑 **Enforced Execution Controls**  
-  Guaranteed **PAUSE**, **STOP**, **RESTART**, **STEER**, and **MANUAL TAKEOVER** semantics backed by Rust monotonic epoch fencing. When you pause or cancel, any in-flight actions are immediately discarded.
-
-* 🎯 **In-Page Visual Overlays**  
-  Zero-dependency, non-invasive Shadow DOM action overlay:
-  * Soft element target outlines
-  * Ripple click indicators
-  * Real-time typing captions
-  * Passive pointer-events isolation ensuring zero interference with normal browsing
-
-* 📜 **Durable Action Journal & Leases**  
-  A local SQLite-backed audit log keeps track of every tab lease, run state, and element interaction, enforcing strict idempotency so non-idempotent actions are never replayed upon network reconnection.
-
-* 🔌 **Universal Agent Gateway**  
-  First-class support for the **Model Context Protocol (MCP)** and newline-delimited JSON (JSONL). Connect Claude Desktop, Antigravity, Cursor, OpenCode, or your own custom agent scripts instantly.
-
-* 🚀 **Correlated Multi-Step Pipelines**  
-  Execute up to 25 ordered browser steps in a single atomic payload using `browser_run_pipeline` with configurable fail-fast behavior and correlated per-step telemetry.
+* 🔐 **Your profile, your tabs:** works in your signed-in Chrome window, on Gmail, GitHub, cloud consoles, internal tools and so on.
+* 🛡️ **Model keys stay put:** your OpenCode / Anthropic / OpenAI / local model credentials stay in the agent's runtime. The extension and web pages never receive them.
+* 🛑 **Real stop controls:** **PAUSE**, **STOP**, **RESTART**, **TAKE OVER** and **RETURN CONTROL**. STOP and RESTART bump a monotonic epoch in the Rust broker, and any queued or late action carrying the old epoch is rejected.
+* 🎯 **In-page overlay:** a Shadow DOM layer with target outlines, click ripples and typing captions. It uses `pointer-events: none`, so it never blocks your own clicks.
+* 📜 **Durable journal:** every run, tab lease and action is written to SQLite. Idempotency keys stop non-idempotent actions from replaying after a reconnect.
+* 🔌 **Works with any agent:** MCP for Claude Desktop, Cursor, Antigravity and similar; JSONL stdio for everything else; plus a shell CLI and an OpenCode plugin.
+* 🚀 **Pipelines:** `browser_run_pipeline` runs an ordered list of steps (up to 1000) in one call, with per-step results and optional fail-fast.
+* 📁 **Real files:** downloads use your Chrome session and wait until the file is saved; uploads attach local files without opening the OS dialog.
+* 🦊 **Firefox port:** a WebExtension build lives in [`apps/firefox-extension`](apps/firefox-extension).
 
 ---
 
 ## 🏗️ Architecture
 
 ```
-                       EXISTING PERSONAL CHROME
+                       YOUR EVERYDAY CHROME
 +-------------------------------------------------------------------+
 | Side Panel Cockpit          | In-Page Action Overlay (Shadow DOM) |
-| - session & timeline        | - target outlines / click pulses    |
-| - PAUSE / STOP / RESTART    | - live typing captions / badges     |
-| - STEER / MANUAL TAKE OVER  | - pointer-events: none (passive)    |
+| - session & timeline        | - target outlines / click ripples   |
+| - PAUSE / STOP / RESTART    | - live typing captions              |
+| - TAKE OVER / RETURN        | - pointer-events: none (passive)    |
 +-------------------------------------------------------------------+
                    | chrome.runtime messaging
                    v
-| Manifest V3 Service Worker: scoped tabs, DOM locators, CDP        |
-| screenshot capture, overlay coordination, native host port        |
 +-------------------------------------------------------------------+
-                   | chrome.runtime.connectNative()
+| Manifest V3 service worker: tabs, DOM locators, CDP, downloads,   |
+| uploads, overlay coordination, native messaging port              |
++-------------------------------------------------------------------+
+                   | chrome.runtime.connectNative()  (stdio)
                    v
 +-------------------------------------------------------------------+
-| Rust Native Messaging Host (`relay-native-host`)                  |
+| Rust native messaging host (`relay-native-host`)                  |
 +-------------------------------------------------------------------+
-                   | Named Pipes / Loopback IPC
+                   | WebSocket, loopback, token-authenticated
                    v
 +-------------------------------------------------------------------+
-| Rust Local Broker Daemon (`relay-broker`)                         |
-| - SQLite action journal & tab lease manager                       |
-| - Monotonic epoch cancellation fencing                            |
-| - WebSocket / IPC loopback server (ws://127.0.0.1:4098)           |
+| Rust broker daemon (`relay-broker`)  ws://127.0.0.1:4098          |
+| - SQLite journal, runs, tab leases, approvals                     |
+| - Approval policy and epoch cancellation fencing                  |
 +-------------------------------------------------------------------+
-                   | Authenticated Loopback
+                   | WebSocket, loopback, token-authenticated
                    v
 +-------------------------------------------------------------------+
-| OpenCode TypeScript Plugin & Universal Agent Gateway              |
-| - MCP Server (`@opencode/relay-agent-gateway`)                    |
-| - JSONL stdio bridge & `browser-relay` CLI                        |
-| - 19 Semantic browser automation tools                            |
+| TypeScript clients                                                |
+| - MCP / JSONL gateway (`@opencode/relay-agent-gateway`)           |
+| - `browser-relay` / `oc-relay` CLI and OpenCode plugin            |
 +-------------------------------------------------------------------+
                    |
                    v
 +-------------------------------------------------------------------+
-| ANY AI AGENT: OpenCode | Claude Desktop | Antigravity | Cursor    |
+| ANY AI AGENT: OpenCode | Claude Desktop | Cursor | your scripts   |
 +-------------------------------------------------------------------+
 ```
+
+More detail: [docs/architecture.md](docs/architecture.md) and the [Master Design Record](OpenCode_Chrome_Relay_Master_Design_Record.md).
 
 ---
 
 ## 🚀 Quickstart
 
+About 10 minutes on a machine that already has Node and Rust. The first Rust build alone can take 3–5 minutes.
+
 ### Prerequisites
 
-* **OS:** Windows 11 / 10
-* **Browser:** Google Chrome (v120+)
-* **Runtimes:** [Node.js](https://nodejs.org/) (v20+) & [Rust](https://rustup.rs/) (v1.75+)
+* **OS:** Windows 10 / 11 (the installer scripts are PowerShell)
+* **Browser:** Google Chrome 120+ (or Firefox 115+ for the port)
+* **Runtimes:** [Node.js](https://nodejs.org/) 20+ and [Rust](https://rustup.rs/) 1.85+
 
-### 1. Clone & Build
+### 1. Clone and build
 
 ```powershell
-# Clone the repository
 git clone https://github.com/Snapwave333/opencode-chrome-relay.git
 cd opencode-chrome-relay
-
-# Build TypeScript packages & Extension
 npm install
 npm run build
-
-# Build Rust crates
-cargo build --workspace --release
+cargo build --workspace
 ```
 
-### 2. Register Chrome Native Messaging Host
+### 2. Start the broker
 
-Register the native host with Chrome using the automated setup script:
+The broker must be running before anything can connect. Leave this window open:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\setup_icons_and_registration.ps1
+.\target\debug\relay-broker.exe
 ```
 
-*(Alternatively, run `powershell -ExecutionPolicy Bypass -File .\installer\windows\install-host.ps1 -ExtensionId "<YOUR_EXTENSION_ID>"`).*
+On its first run it generates an auth token and saves it to `%APPDATA%\opencode-relay\auth-token`. The native host, CLI and gateway all read that file, so you don't need to copy the token anywhere.
 
-### 3. Load the Chrome Extension
+Optional environment variables: `RELAY_HOST` (default `127.0.0.1`), `RELAY_PORT` (default `4098`), `RELAY_DB_PATH` (default `opencode_relay.sqlite` in the current folder), `RELAY_AUTH_TOKEN` (overrides the token file).
 
-1. Open Google Chrome and navigate to `chrome://extensions`.
-2. Toggle on **Developer mode** (top-right corner).
-3. Click **Load unpacked** and select the folder:
-   `apps/chrome-extension`
-4. Pin the **OpenCode Chrome Relay** icon to your toolbar and open the Chrome Side Panel.
+### 3. Load the Chrome extension
+
+1. Open `chrome://extensions` and turn on **Developer mode** (top right).
+2. Click **Load unpacked** and pick `apps/chrome-extension`.
+3. Check that the ID is `pogdiiiklddnjkdmnhkdbcelighmkjgb`. It is fixed by the `key` in the manifest.
+4. Pin **OpenCode Chrome Relay** and open the side panel.
+
+### 4. Register the native messaging host
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\installer\windows\install-host.ps1 -ExtensionId pogdiiiklddnjkdmnhkdbcelighmkjgb
+```
+
+This writes the host manifest and the `HKCU` registry key that point Chrome at `target\debug\relay-native-host.exe`. Add `-TargetConfig release` if you built with `--release`. Then reload the extension on `chrome://extensions`.
+
+To remove it later: `installer\windows\uninstall-host.ps1`.
+
+### 5. Check it works
+
+```powershell
+node packages/opencode-plugin/dist/cli.js status
+node packages/opencode-plugin/dist/cli.js tabs
+```
+
+`tabs` should list your open Chrome tabs. If not, see [Troubleshooting](#-troubleshooting).
+
+<details>
+<summary><strong>🦊 Firefox</strong></summary>
+
+1. Open `about:debugging#/runtime/this-firefox` → **Load Temporary Add-on** → pick `apps/firefox-extension/manifest.json`.
+2. Register the host for Firefox:
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\installer\windows\install-host-firefox.ps1
+   ```
+
+The add-on ID is `opencode-relay@example.com`, which is the installer's default.
+
+</details>
 
 ---
 
 ## 🤖 Agent Integration
 
-### Option A: Model Context Protocol (MCP)
+### Option A: MCP (Claude Desktop, Cursor, Antigravity…)
 
-Add the relay gateway to your agent's MCP configuration (e.g. `claude_desktop_config.json` or Antigravity / Cursor settings):
+Add the gateway to your agent's MCP config, e.g. `claude_desktop_config.json`. Use the absolute path to your clone:
 
 ```json
 {
   "mcpServers": {
     "relay-browser": {
       "command": "node",
-      "args": [
-        "C:\\Users\\chrom\\Desktop\\opencoderealy\\packages\\agent-gateway\\dist\\index.js"
-      ],
-      "env": {
-        "RELAY_BROKER_URL": "ws://127.0.0.1:4098",
-        "RELAY_AUTH_TOKEN": "local-dev-token"
-      }
+      "args": ["C:\\path\\to\\opencode-chrome-relay\\packages\\agent-gateway\\dist\\index.js"]
     }
   }
 }
 ```
 
-### Option B: OpenCode CLI Plugin
+The gateway reads the token from `%APPDATA%\opencode-relay\auth-token`. Add an `env` block only to override it, using `RELAY_BROKER_URL` or `RELAY_AUTH_TOKEN`. Never commit a real token to a config file.
 
-Run OpenCode with the relay plugin loaded directly:
+### Option B: OpenCode plugin
 
-```bash
-opencode --plugin ./packages/opencode-plugin
-```
+Copy (or link) `packages/opencode-plugin` into `~/.config/opencode/plugins/opencode-chrome-relay`. OpenCode loads plugins from that folder on startup.
 
-### Option C: Universal CLI (`browser-relay` / `oc-relay`)
+### Option C: CLI (`browser-relay` / `oc-relay`)
 
-Use the built-in CLI for ad-hoc browser inspections or shell scripting:
+For shell scripts and quick checks. Run `node packages/opencode-plugin/dist/cli.js --help` for the full list. Common commands:
 
 ```powershell
-# List all active browser tabs
-node packages/opencode-plugin/dist/cli.js list-tabs
+# Tabs and navigation
+node packages/opencode-plugin/dist/cli.js tabs
+node packages/opencode-plugin/dist/cli.js nav https://github.com --new-tab
 
-# Take an accessibility & DOM snapshot
-node packages/opencode-plugin/dist/cli.js snapshot --tab-id 123456
+# Look at the page: snapshot gives numbered elements you can click by index
+node packages/opencode-plugin/dist/cli.js snapshot
+node packages/opencode-plugin/dist/cli.js find "Sign in"
 
-# Click an element using semantic accessibility locators
-node packages/opencode-plugin/dist/cli.js click --role "button" --name "Save preferences"
+# Act on it
+node packages/opencode-plugin/dist/cli.js click "Save preferences"
+node packages/opencode-plugin/dist/cli.js type "#search" "epoch fencing"
+node packages/opencode-plugin/dist/cli.js press Enter
 
-# Type into a labeled field
-node packages/opencode-plugin/dist/cli.js type --label "Search documentation" --text "Monotonic epoch fencing"
+# Files
+node packages/opencode-plugin/dist/cli.js screenshot page.png
+node packages/opencode-plugin/dist/cli.js download https://example.com/report.pdf C:\Reports
+node packages/opencode-plugin/dist/cli.js upload "Select file" C:\photos\cat.jpg
 ```
 
-### Option D: JSONL Stdio Transport
+Useful options: `--tab <id>`, `--json` (machine-readable output), `--timeout <ms>`, and `--yes`, which approves an action the policy flags as sensitive.
 
-For agents without native MCP support, stream newline-delimited JSON commands:
+`agent "<goal>"` runs the built-in autonomous agent on NVIDIA NIM. It needs `NVIDIA_API_KEY`, and optionally `NVIDIA_BASE_URL`.
+
+### Option D: JSONL over stdio
+
+For agents without MCP, send one JSON request per line:
 
 ```powershell
-# List available tools
 '{"id":1,"method":"tools/list"}' | npm run gateway:jsonl
-
-# Capture snapshot
 '{"id":2,"method":"tools/call","params":{"name":"browser_snapshot","arguments":{}}}' | npm run gateway:jsonl
 
-# Inspect full capability manifest
+# Full capability manifest
 npm run gateway:manifest
 ```
 
 ---
 
-## 🛠️ 19 Browser Tools
+## 🛠️ Browser Tools
 
-Every tool operates with semantic locators (accessible role, name, label, text) before falling back to re-validated viewport coordinates:
+The gateway exposes 31 tools. Run `npm run gateway:manifest` for the full schemas. Interaction tools locate elements by role, accessible name, label, text or CSS selector.
 
-| Tool | Category | Description |
-| :--- | :--- | :--- |
-| `browser_list_tabs` | Session | List open tabs with titles, URLs, active status, and lease state. |
-| `browser_attach` | Lease | Attach agent lease to a specific tab and origin scope. |
-| `browser_detach` | Lease | Release tab lease and restore neutral status. |
-| `browser_snapshot` | Perception | Capture semantic accessibility tree and interactive DOM map. |
-| `browser_screenshot` | Perception | Capture full-page or viewport CDP screenshot. |
-| `browser_navigate` | Navigation | Navigate tab to a given URL with history verification. |
-| `browser_click` | Interaction | Click elements using role, name, label, or verified coordinates. |
-| `browser_type` | Interaction | Type text into input fields, textareas, or contenteditables. |
-| `browser_keypress` | Interaction | Send keyboard keypresses (`Enter`, `Escape`, `Tab`, shortcuts). |
-| `browser_scroll` | Interaction | Scroll vertically or horizontally by pixels or to elements. |
-| `browser_select` | Interaction | Select options in native dropdowns or custom select menus. |
-| `browser_wait` | Synchronization | Wait for selector presence, URL change, or network idle. |
-| `browser_extract` | Extraction | Extract structured table data, text, or HTML attributes. |
-| `browser_download` | Filesystem | Trigger user-approved file download with integrity checks. |
-| `browser_dialog_dismiss` | OS Native | Inspect and dismiss native browser/OS save dialogs. |
-| `browser_verify` | Verification | Assert element text, state, or presence on page. |
-| `browser_status` | Telemetry | Retrieve current tab lease, broker epoch, and execution state. |
-| `browser_run_pipeline` | Batch Execution | Run up to 25 ordered steps with correlated telemetry & fail-fast. |
-| `browser_control` | Governance | Issue runtime control signals (`pause`, `resume`, `stop`, `takeover`). |
+| Group | Tools |
+| :--- | :--- |
+| **Tabs** | `browser_list_tabs`, `browser_new_tab`, `browser_close_tab`, `browser_switch_tab` |
+| **Lease** | `browser_attach`, `browser_detach`, `browser_status` |
+| **Look** | `browser_snapshot`, `browser_screenshot`, `browser_extract`, `browser_verify` |
+| **Navigate** | `browser_navigate` |
+| **Interact** | `browser_click`, `browser_dblclick`, `browser_rightclick`, `browser_type`, `browser_keypress`, `browser_scroll`, `browser_select`, `browser_wait` |
+| **Files** | `browser_download`, `browser_upload`, `browser_pdf` |
+| **Batch** | `browser_run_pipeline` |
+| **Run control** | `relay_pause`, `relay_resume`, `relay_stop`, `relay_restart`, `relay_take_over`, `relay_return_control`, `relay_status` |
 
 ---
 
 ## 🛡️ Security & Privacy
 
-OpenCode Chrome Relay is engineered from the ground up around strict local-first security boundaries:
+1. **Loopback only:** the broker listens on `127.0.0.1` and rejects any connection without the token. No cloud relay, no telemetry.
+2. **Approval policy:** the broker checks every action before it runs. These need approval (`--yes` on the CLI): actions marked irreversible or sensitive, actions whose target text matches sensitive words (checkout, delete and similar), and actions outside the run's allowed origins.
+3. **Forbidden URLs:** the broker refuses `chrome://`, `chrome-extension://`, `edge://`, `about:`, `devtools://`, `view-source:` and `javascript:` targets outright.
+4. **Page content is untrusted:** DOM text and attributes are returned as data. They are never treated as instructions for the relay.
+5. **No credential access:** the extension doesn't read saved passwords, passkeys, cards or OS credentials. 2FA and CAPTCHA prompts are left to you.
 
-1. **Untrusted Page Content:** Page DOM, attributes, and text are treated as strictly untrusted inputs. They cannot alter the agent's governing system prompt or escalate privileges.
-2. **Origin Fencing:** Explicitly refuses attachment to `chrome://`, `chrome-extension://`, and protected internal browser spaces.
-3. **Sensitive Data Protection:** The extension never inspects or exports stored passwords, passkeys, credit cards, or OS credentials. Authentication challenges (2FA, CAPTCHA) are delegated to the user.
-4. **Zero Cloud Brokerage:** All broker IPC occurs strictly over loopback (`127.0.0.1` / named pipes) authenticated via local tokens. No third-party relays or telemetry servers.
+Heads-up: the extension requests `<all_urls>` and `debugger` permissions. That is what lets it act on any site you open. See [docs/permissions.md](docs/permissions.md) and [docs/threat-model.md](docs/threat-model.md).
 
 ---
 
-## 🧪 Testing & Verification
+## 🩺 Troubleshooting
 
-The test suite covers unit logic, security fences, protocol contracts, and end-to-end execution:
+| Symptom | Likely cause | Fix |
+| :--- | :--- | :--- |
+| `Could not connect to … broker` | Broker not running | Start `target\debug\relay-broker.exe` |
+| `rejected the auth token` | Token file and `RELAY_AUTH_TOKEN` disagree | Unset `RELAY_AUTH_TOKEN`, or set it to the contents of `%APPDATA%\opencode-relay\auth-token` |
+| `Specified native messaging host not found` | Host not registered, or registered for another extension ID | Re-run `install-host.ps1 -ExtensionId pogdiiiklddnjkdmnhkdbcelighmkjgb`, then reload the extension |
+| `tabs` returns nothing | Extension service worker asleep or disconnected | Open the side panel, or click **Reload** on `chrome://extensions` |
+| Upload fails with "Allow access to file URLs" | Chrome's file-access toggle is off | `chrome://extensions` → Details → turn on **Allow access to file URLs** |
+| Download stalls | Chrome's "Ask where to save each file" is on | Answer the dialog, run `save-dialog`, or turn the setting off |
+
+---
+
+## 🧪 Tests
 
 ```powershell
-# Run Vitest test suite (12 test suites, 43+ tests)
-npm test
-
-# Run Rust broker & host tests
-cargo test --workspace
-
-# Run Playwright end-to-end tests
-npm run test:e2e
+npm test                 # Vitest: unit, security and contract suites
+cargo test --workspace   # Rust broker and native host
+npm run test:e2e         # Playwright end-to-end
+npm run typecheck        # tsc on all packages
+npm run lint             # build + clippy + rustfmt check
 ```
 
 ---
@@ -290,22 +304,22 @@ npm run test:e2e
 ```
 opencode-chrome-relay/
 ├── apps/
-│   └── chrome-extension/      # Manifest V3 extension (Side Panel, Content Overlay, CDP)
+│   ├── chrome-extension/      # Manifest V3 extension (side panel, overlay, CDP)
+│   └── firefox-extension/     # Firefox WebExtension port
 ├── crates/
-│   ├── relay-broker/          # Rust broker daemon (SQLite journal, epoch cancellation)
-│   └── relay-native-host/     # Chrome Native Messaging stdio host executable
+│   ├── relay-broker/          # Rust broker (SQLite journal, policy, epoch fencing)
+│   └── relay-native-host/     # Native messaging stdio host
 ├── packages/
-│   ├── agent-gateway/         # Provider-neutral MCP Server & JSONL bridge
-│   ├── opencode-plugin/       # OpenCode CLI plugin & browser-relay CLI
-│   └── protocol/              # Shared TypeScript interfaces & Zod schemas
-├── installer/
-│   └── windows/               # Windows native messaging host manifests & registry scripts
-├── docs/                      # Master Design Record & detailed architecture specs
-└── tests/                     # Unit, security, and contract test suites
+│   ├── agent-gateway/         # MCP server and JSONL bridge
+│   ├── opencode-plugin/       # OpenCode plugin and browser-relay CLI
+│   └── protocol/              # Shared TypeScript types and Zod schemas
+├── installer/windows/         # Native host install / uninstall scripts
+├── docs/                      # Architecture, permissions, threat model
+└── tests/                     # Unit, security, contract and e2e suites
 ```
 
 ---
 
 ## 📄 License
 
-This project is licensed under the [MIT License](LICENSE).
+[MIT](LICENSE)
